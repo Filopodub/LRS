@@ -13,9 +13,15 @@ find_package(mavros_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
 add_executable(takeoff_drone src/takeoff_drone.cpp)
+target_include_directories(takeoff_drone PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 ament_target_dependencies(takeoff_drone rclcpp mavros_msgs std_msgs)
 install(TARGETS takeoff_drone
   DESTINATION lib/${PROJECT_NAME}
+)
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 if(BUILD_TESTING)

@@ -28,3 +28,6 @@ ros2 run my_drone_control takeoff_drone --ros-args -p target_altitude:=2.0
 This node assumes MAVROS and the flight controller are already configured and
 flight-ready. Test in SITL before using real hardware, and keep a manual abort
 available. It does not land or disarm after reaching altitude.
+
+whole structure were working on:
+![alt text](/misselanious/image.png)
