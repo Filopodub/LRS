@@ -69,6 +69,12 @@ ros2 launch my_drone_control planner.launch.py
    rviz2 -d $(ros2 pkg prefix my_drone_control)/share/my_drone_control/config/planner_view.rviz
    ```
 
+3. **Run the Autonomous Takeoff Node:**
+   ```bash
+   source install/setup.bash
+   ros2 run my_drone_control takeoff_drone
+   ```
+
 ---
 
 ## ROS 2 Interface
