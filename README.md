@@ -18,13 +18,15 @@ source install/setup.bash
 ros2 run my_drone_control takeoff_drone
 ```
 
-The default target is 5 m, matching the LRS-URK outdoor assignment. Override it
-without recompiling:
+The node prompts for the target altitude in the terminal before it starts
+waiting for MAVROS. Press Enter to use the default of 5 m, or enter a positive
+value in meters. The default can also be changed without recompiling:
 
 ```bash
 ros2 run my_drone_control takeoff_drone --ros-args -p target_altitude:=2.0
 ```
 
+![alt text](miscellaneous/structure.png)
+
 This node assumes MAVROS and the flight controller are already configured and
-flight-ready. Test in SITL before using real hardware, and keep a manual abort
-available. It does not land or disarm after reaching altitude.
+flight-ready. It does not land or disarm after reaching altitude.

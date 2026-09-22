@@ -1,6 +1,8 @@
 #include <chrono>
 #include <cmath>
+#include <iostream>
 #include <memory>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 
@@ -8,10 +10,31 @@
 #include "mavros_msgs/srv/command_bool.hpp"
 #include "mavros_msgs/srv/command_tol.hpp"
 #include "mavros_msgs/srv/set_mode.hpp"
+#include "my_drone_control/terminal_input.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/float64.hpp"
 
 using namespace std::chrono_literals;
+
+double prompt_for_target_altitude(double default_altitude)
+{
+  while (rclcpp::ok()) {
+    std::cout << "Enter target altitude in meters [" << default_altitude << "]: " << std::flush;
+    std::string input;
+    if (!std::getline(std::cin, input) || input.empty()) {
+      return default_altitude;
+    }
+
+    std::stringstream parser(input);
+    double altitude;
+    char extra;
+    if (parser >> altitude && !(parser >> extra) && std::isfinite(altitude) && altitude > 0.0) {
+      return altitude;
+    }
+    std::cout << "Please enter a positive number, or press Enter to use the default.\n";
+  }
+  return default_altitude;
+}
 
 class TakeoffDrone : public rclcpp::Node
 {
@@ -47,8 +70,13 @@ public:
     mode_client_ = create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
     arm_client_ = create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
     takeoff_client_ = create_client<mavros_msgs::srv::CommandTOL>("mavros/cmd/takeoff");
-    timer_ = create_wall_timer(100ms, [this]() { control_loop(); });
+    timer_ = create_wall_timer(100ms, [this]() {control_loop();});
     start_time_ = now();
+  }
+
+  void set_target_altitude(double altitude)
+  {
+    target_altitude_ = altitude;
   }
 
 private:
@@ -58,7 +86,8 @@ private:
   {
     if (stage_ == Stage::WAITING_FOR_CONNECTION) {
       if (state_received_ && state_.connected) {
-        RCLCPP_INFO(get_logger(), "MAVROS connected; preparing takeoff to %.1f m", target_altitude_);
+        RCLCPP_INFO(get_logger(), "MAVROS connected; preparing takeoff to %.1f m",
+          target_altitude_);
         stage_ = Stage::SETTING_MODE;
         stage_start_time_ = now();
       } else if ((now() - start_time_).seconds() > connection_timeout_) {
@@ -107,7 +136,8 @@ private:
 
     if (stage_ == Stage::CLIMBING) {
       if (altitude_received_ && relative_altitude_ >= target_altitude_ - altitude_tolerance_) {
-        RCLCPP_INFO(get_logger(), "Takeoff complete at %.2f m relative altitude", relative_altitude_);
+        RCLCPP_INFO(get_logger(), "Takeoff complete at %.2f m relative altitude",
+          relative_altitude_);
         rclcpp::shutdown();
       } else if (timed_out()) {
         abort("takeoff altitude was not reached");
@@ -182,7 +212,7 @@ private:
   bool timed_out() const
   {
     return (now() - stage_start_time_).seconds() >
-      (stage_ == Stage::CLIMBING ? takeoff_timeout_ : connection_timeout_);
+           (stage_ == Stage::CLIMBING ? takeoff_timeout_ : connection_timeout_);
   }
 
   void abort(const std::string & reason)
@@ -223,7 +253,10 @@ int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
   try {
-    rclcpp::spin(std::make_shared<TakeoffDrone>());
+    auto node = std::make_shared<TakeoffDrone>();
+    node->set_target_altitude(
+      prompt_for_target_altitude(node->get_parameter("target_altitude").as_double()));
+    rclcpp::spin(node);
   } catch (const std::exception & error) {
     RCLCPP_FATAL(rclcpp::get_logger("takeoff_drone"), "Startup failed: %s", error.what());
   }
