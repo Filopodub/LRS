@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # ROS 2 generated files
 build/
 install/
@@ -9,3 +10,8 @@ __pycache__/
 
 # Editor files
 .vscode/
+=======
+/build
+/install
+/log
+>>>>>>> origin/main
