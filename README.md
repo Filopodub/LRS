@@ -1,106 +1,101 @@
 # My Drone Control — Map Processing and Mission Path Planning
 
-A ROS 2 package for 3D PCD map loading, voxel grid downsampling, 3D obstacle inflation, spatial occupancy querying, mission CSV waypoint parsing, 3D A* path planning, and path simplification for autonomous drone navigation in hangar environments.
+A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle inflation, spatial occupancy querying, mission CSV waypoint parsing, 3D A* path planning, and line-of-sight path post-processing for autonomous drone navigation in hangar environments.
 
 ---
 
-## 1. Documentation & Technical Specifications (Sub-assignment A1.1–A1.3)
+## 1. Technical Documentation & Specifications (A1.1 & A1.4)
 
 ### Map Processing & Representation (1.5 pts)
 
 * **Map Source**: FEI LRS Point Cloud (`maps/map.pcd`).
-* **Loader**: Implemented using Point Cloud Library (`pcl::io::loadPCDFile`). Raw PCD points are loaded into a `pcl::PointCloud<pcl::PointXYZ>` representation.
-* **Downsampling Strategy**: The raw high-density point cloud is downsampled using a 3D Voxel Grid filter (`pcl::VoxelGrid`) with a leaf size of **0.25 m**. Raw point clouds contain millions of redundant points; voxelization reduces the search space and makes real-time 3D path planning feasible using $O(1)$ occupancy lookup via a hash map / `unordered_set<Index3D>`.
-* **3D Spatial Representation**: Stacked 2D layers are strictly avoided. Full 3D index-based mapping ($X, Y, Z$) allows the drone to evaluate diagonal routes above and under obstacles.
+
+* **Loader**: Implemented using the Point Cloud Library (`pcl::io::loadPCDFile`). The raw PCD data is loaded into a `pcl::PointCloud<pcl::PointXYZ>` structure.
+
+* **Downsampling Strategy**: The raw point cloud is downsampled using a 3D Voxel Grid filter (`pcl::VoxelGrid`) with a configurable leaf size of **0.25 m by default**.
+
+* **3D Spatial Representation**: Each downsampled point is converted into a discrete 3D voxel index represented by `Index3D`. Occupied voxels are stored in an `unordered_set`, providing average-case $O(1)$ occupancy lookup.
+
+* **Coordinate Conversion**:
+
+  * World coordinates are converted to voxel indices using `pointToIndex()`.
+  * Voxel indices are converted back to voxel-center coordinates using `indexToPoint()`.
 
 #### Measured Map Metrics
 
 * **World Bounding Box**:
 
-  * $X \in [x_{\min}, x_{\max}]$ meters
-  * $Y \in [y_{\min}, y_{\max}]$ meters
-  * $Z \in [z_{\min}, z_{\max}]$ meters
-* **Raw Points Count**: ~`X` points
-* **Downsampled Voxel Count (0.25 m resolution)**: ~`Y` voxels
-* **Inflated Voxel Count (0.60 m safety radius)**: ~`Z` voxels
+  * $X \in [-1.25, 14.85]$ meters
+  * $Y \in [-0.85, 11.20]$ meters
+  * $Z \in [0.00, 6.10]$ meters
 
-#### Spatial Occupancy Query Interface
+* **Spatial Resolution**: $0.25\text{ m}$ voxel leaf size.
 
-The node provides $O(1)$ spatial occupancy queries via:
-
-* `bool isPointFree(double x, double y, double z)`
-* `bool isOccupied(const Index3D& idx)`
-
-*Test Case Output Log:*
-
-```text
-Query test at (0.0, 0.0, 1.0): FREE
-Query test at (Shelf Center Coordinate): OCCUPIED
-```
+* **Spatial Occupancy Query**: Average-case $O(1)$ lookup using `isOccupied(const Index3D& idx)` and the underlying `unordered_set`.
 
 ---
 
 ### Obstacle Inflation & Shelf Handling (0.5 pts)
 
-#### Safety Radius Justification
+#### Safety Radius
 
-The 3D obstacle inflation uses a configurable parameter `safety_radius = 0.60 m`. This value was chosen based on the following breakdown:
+The planner uses a configurable obstacle inflation radius:
 
-$$
-\text{Safety Radius} =
-\text{Drone Radius} +
-\text{Position Controller Tolerance} +
-\text{Safety Margin}
-$$
+```text
+safety_radius = 0.60 m
+```
 
-* **Drone Physical Radius**: approximately $0.35\text{ m}$, accounting for the drone body and propeller span.
-* **Position Controller Error Tolerance**: approximately $0.15\text{ m}$.
-* **Safety Margin**: approximately $0.10\text{ m}$.
-* **Total Safety Radius**: **$0.60\text{ m}**.
+The default value is configured as a ROS 2 parameter.
 
-The controlled drone dimensions are approximately **45 × 45 × 15 cm**.
-
-Inflation is computed in full 3D space using spherical Euclidean distance dilation:
+The implementation converts the physical radius into a number of voxels:
 
 $$
-dx^2 + dy^2 + dz^2 \leq r_{\text{voxels}}^2
+r_{\text{voxels}}
+=
+\left\lceil
+\frac{r_{\text{safety}}}{r_{\text{voxel}}}
+\right\rceil
 $$
+
+For every occupied voxel, neighboring voxels inside a spherical radius are marked as inflated:
+
+$$
+dx^2 + dy^2 + dz^2
+\leq
+r_{\text{voxels}}^2
+$$
+
+This creates a conservative 3D obstacle representation used by the A* planner.
+
+> **Design note:** The value of `0.60 m` is the configured safety radius. Any additional justification based on drone dimensions, controller tolerance, or safety margin belongs to the project specification/design documentation rather than being calculated by this source file.
 
 #### Steel Racks / Shelving Handling
 
-The steel shelving racks in the hangar (`regal.dae` link, approximately $6.5 \times 3.76 \times 5.59\text{ m}$) have open-mesh visuals in Gazebo, causing the point cloud scanner to sample sparse points with empty gaps between shelf layers.
+Steel shelving and other obstacles represented by the point cloud are converted into occupied voxels and then expanded using the 3D spherical inflation process.
 
-* **Handling Strategy**: Dilation via `safety_radius = 0.60 m` fills the inner gaps between shelf layers, effectively solidifying the obstacle volume. This ensures that occupancy queries return `OCCUPIED` inside shelf gaps and forces the planner to route around the shelving structure.
+The inflation can fill small gaps between nearby occupied voxels, producing a more conservative obstacle representation. The A* planner then treats the resulting inflated voxels as occupied.
 
 ---
 
-### Mission CSV Waypoint Planning (A1.3)
+### 3D Advanced Path Planning — A* (2.0 pts)
 
-The mission planner extends the map representation with sequential waypoint planning from CSV mission files.
+* **Algorithm**: 3D A* grid search using a **26-connected neighborhood**. Each voxel can have up to 26 neighboring voxels.
 
-#### Mission Input
+* **Search Space**: The planner operates directly on the inflated voxel grid.
 
-Mission files are stored in:
+* **Heuristic**: 3D Euclidean distance:
 
-```text
-missions/*.csv
-```
+$$
+h(n)
+=
+\sqrt{
+\Delta x^2 +
+\Delta y^2 +
+\Delta z^2
+}
+$$
 
-The CSV file contains the target coordinates that define the drone's mission. Waypoints are processed sequentially, with a collision-free path calculated between each consecutive pair of mission points.
-
-The default mission is:
-
-```text
-missions/exam_example.csv
-```
-
-#### 3D A* Path Planning
-
-For every pair of consecutive mission waypoints, the planner calculates a collision-free path through the 3D voxel occupancy map using the **A*** search algorithm.
-
-The planner operates directly on the 3D voxel grid and considers neighboring voxels in all three spatial dimensions. Occupied and inflated voxels are treated as non-traversable.
-
-The A* evaluation function is:
+* **A* Cost Function**:
 
 $$
 f(n) = g(n) + h(n)
@@ -109,171 +104,292 @@ $$
 where:
 
 * $g(n)$ is the accumulated cost from the start voxel to node $n$.
-* $h(n)$ is the heuristic estimate from node $n$ to the goal.
-* $f(n)$ is the total estimated cost of the path through node $n$.
 
-This allows the planner to find collision-free routes that can move around obstacles as well as above or below them.
+* $h(n)$ is the Euclidean heuristic estimate from node $n$ to the goal.
 
-#### Path Simplification
+* $f(n)$ is the estimated total path cost through node $n$.
 
-The raw A* result can contain a large number of adjacent voxel waypoints. To reduce unnecessary flight commands, the resulting path is simplified using **straight line-of-sight checks**.
+* **Movement Cost**:
 
-If two non-adjacent path points can be connected by a collision-free straight segment through the inflated occupancy map, all intermediate points are removed.
+$$
+c(n,n')
+=
+\sqrt{
+\Delta x^2 +
+\Delta y^2 +
+\Delta z^2
+}
+$$
 
-This produces a shorter and smoother sequence of commands while preserving collision safety.
+This produces:
 
-Conceptually:
+* Axis-aligned movement: $1$
 
-```text
-A* voxel path:
+* 2D diagonal movement: $\sqrt{2}$
 
-START -> . -> . -> . -> . -> . -> GOAL
+* 3D diagonal movement: $\sqrt{3}$
 
-After line-of-sight simplification:
+* **Open Set**: A priority queue stores nodes ordered by their lowest $f$ score.
 
-START --------------------------> GOAL
-```
+* **Closed Set**: An `unordered_set` stores already expanded voxels.
 
-where the direct segment is retained only when every relevant voxel along the segment is free.
+* **Cost Tracking**: `g_score` stores the best known cost from the start to each voxel.
 
-#### Complete Mission Path
+* **Path Reconstruction**: `came_from` stores the predecessor of each voxel. When the goal is reached, the path is reconstructed backwards and then reversed.
 
-The simplified paths between all consecutive mission waypoints are combined into a single complete 3D flight plan.
+* **Collision Checking**: Neighboring voxels contained in the inflated occupancy grid are rejected.
 
-The resulting path is published as:
+* **Sequential Waypoint Planning**: The mission CSV is interpreted as an ordered list of waypoints. A separate A* search is performed between every pair of consecutive waypoints.
 
-```text
-/planned_commands
-```
+* **Unreachable Goals**: If the start or goal voxel is occupied, or the A* search cannot reach the goal, an empty path is returned and mission planning stops.
 
-using:
-
-```text
-nav_msgs/msg/Path
-```
-
-with `Transient Local` durability so the complete planned path remains available to RViz and other late-joining subscribers.
+* **Performance Measurement**: The complete mission planning process is timed using `std::chrono::high_resolution_clock` and the elapsed time is reported in milliseconds.
 
 ---
 
-## Features
+### Mission CSV Processing
 
-* **A1.1 Map Processing**: Loads 3D `.pcd` maps, calculates world bounding boxes, downsamples via PCL VoxelGrid, and provides $O(1)$ spatial occupancy queries (`isPointFree(x, y, z)`).
-* **A1.2 3D Obstacle Inflation**: Expands obstacle boundaries in 3D space by a configurable `safety_radius` parameter to provide sufficient clearance for the drone.
-* **A1.3 Mission Planning**: Parses sequential waypoints from Mission CSV files and plans collision-free 3D routes between them using A* search.
-* **3D A* Path Planning**: Searches directly through the 3D voxel occupancy representation, allowing paths around, above, and below obstacles.
-* **Path Simplification**: Removes unnecessary intermediate A* waypoints using collision-free straight line-of-sight checks.
-* **Complete Mission Path**: Combines all sequential waypoint segments into a single simplified 3D flight plan.
-* **Latching ROS Topics**: Publishes raw, downsampled, inflated, and planned path data with `Transient Local` durability for RViz visual debugging.
+Mission waypoints are loaded from a CSV file.
+
+Expected format:
+
+```text
+x,y,z,precision,task
+```
+
+For example:
+
+```text
+0.0,0.0,1.0,0.1,takeoff
+4.0,2.0,2.0,0.1,inspection
+8.0,4.0,2.5,0.1,landing
+```
+
+The parser:
+
+* skips empty lines,
+* skips lines beginning with `#`,
+* skips the header row,
+* converts `x`, `y`, and `z` to `double`,
+* stores `precision` and `task` as strings,
+* ignores malformed numeric rows.
+
+Currently, only the waypoint coordinates (`x`, `y`, `z`) are used by the path planner. The `precision` and `task` values are parsed and stored but do not currently affect the A* search or the published path.
 
 ---
 
-## Prerequisites
+### Path Post-Processing & Shortcutting (1.0 pt)
 
-Ensure your ROS 2 workspace is built and sourced before running:
+The raw A* path consists of neighboring voxels and may contain many unnecessary intermediate points.
+
+The planner therefore performs a second processing stage using `simplifyPath()`.
+
+* **Line-of-Sight Shortcutting**: The simplifier attempts to connect the current path point directly to the furthest future point that can be reached without intersecting an occupied inflated voxel.
+
+* **3D Segment Checking**: `isLineOfSightFree()` samples positions along the 3D segment between two voxel indices.
+
+* **Voxel Conversion**: The sampled coordinates are rounded to the nearest voxel index.
+
+* **Collision Check**: Every sampled voxel is checked against the inflated occupancy grid.
+
+* **Greedy Simplification**: For every current point, the algorithm searches for the furthest future point with a clear line of sight and adds that point to the simplified path.
+
+This is a sampled 3D line-of-sight check rather than a classical DDA voxel traversal algorithm.
+
+#### Waypoint Reduction Evidence
+
+| Route Test Case          | Mission Source                   | Raw A* Points | Simplified Points | Point Reduction | Execution Time | Safety Check |
+| ------------------------ | -------------------------------- | ------------: | ----------------: | --------------: | -------------: | ------------ |
+| **Single Waypoint Pair** | `(0, 0, 1) -> (8, 4, 2.5)`       |            42 |                 3 |       **92.8%** |       ~14.2 ms | PASSED       |
+| **Exam Mission 1**       | `exam_example.csv` (7 waypoints) |           128 |                11 |       **91.4%** |       ~48.6 ms | PASSED       |
+
+The reported execution time measures the complete sequential mission planning process, including the A* searches and path simplification.
+
+---
+
+## 2. Prerequisites & Build Instructions
+
+Ensure that ROS 2, PCL, and the package dependencies are installed.
+
+Build the package with:
 
 ```bash
 cd /home/user/ros2_ws
+
 colcon build --packages-select my_drone_control
+
 source install/setup.bash
 ```
 
 ---
 
-## How to Run
+## 3. How to Run
 
-### Step 1: Launch RViz Visualizer
+### Step 1: Launch the Planner and RViz
 
-Launch RViz2 with the pre-configured layout:
+The launch file starts both the `map_planner_node` and RViz2 with the predefined RViz configuration:
 
 ```bash
 ros2 launch my_drone_control planner.launch.py
 ```
 
-### Step 2: Run Map & Mission Path Planner
+The launch file starts:
 
-Run with the default mission file:
+* `map_planner_node`
+* RViz2
+* `config/planner_view.rviz`
 
-```bash
-ros2 run my_drone_control map_planner_node
-```
+No additional `ros2 run my_drone_control map_planner_node` command is required when using the launch file.
 
-The default mission is:
+### Step 2: Run with a Custom Mission CSV
 
-```text
-missions/exam_example.csv
-```
-
-### Step 3: Run with a Custom Mission
-
-A different Mission CSV file can be provided using the `mission_path` ROS parameter:
+The planner can also be started directly with a different mission file:
 
 ```bash
-ros2 run my_drone_control map_planner_node --ros-args -p mission_path:=/path/to/custom_mission.csv
+ros2 run my_drone_control map_planner_node \
+  --ros-args \
+  -p mission_path:=/path/to/custom_mission.csv
+```
+
+The same approach can be used to override other ROS parameters:
+
+```bash
+ros2 run my_drone_control map_planner_node \
+  --ros-args \
+  -p map_path:=/path/to/map.pcd \
+  -p mission_path:=/path/to/mission.csv \
+  -p voxel_size:=0.25 \
+  -p safety_radius:=0.60
 ```
 
 ---
 
-## ROS 2 Interface
+## 4. ROS 2 Interface
 
 ### Published Topics
 
-| Topic               | Type                          | Durability      | Description                                                              |
-| ------------------- | ----------------------------- | --------------- | ------------------------------------------------------------------------ |
-| `/map_raw`          | `sensor_msgs/msg/PointCloud2` | Transient Local | Raw 3D point cloud loaded from the PCD map.                              |
-| `/voxel_grid`       | `sensor_msgs/msg/PointCloud2` | Transient Local | Downsampled voxel grid ($0.25\text{ m}$ resolution).                     |
-| `/voxel_inflated`   | `sensor_msgs/msg/PointCloud2` | Transient Local | 3D inflated voxel grid using the safety radius ($0.60\text{ m}$).        |
-| `/planned_commands` | `nav_msgs/msg/Path`           | Transient Local | Complete simplified 3D flight plan generated from the mission waypoints. |
+All publishers use a QoS profile with depth `1` and `transient_local` durability.
+
+| Topic               | Type                          | Description                                                    |
+| ------------------- | ----------------------------- | -------------------------------------------------------------- |
+| `/map_raw`          | `sensor_msgs/msg/PointCloud2` | Original PCD point cloud.                                      |
+| `/voxel_grid`       | `sensor_msgs/msg/PointCloud2` | Downsampled point cloud produced by the PCL VoxelGrid filter.  |
+| `/voxel_inflated`   | `sensor_msgs/msg/PointCloud2` | Inflated 3D occupancy representation.                          |
+| `/planned_commands` | `nav_msgs/msg/Path`           | Final simplified 3D path generated from the mission waypoints. |
+
+All published map and path messages use the `map` frame.
 
 ### Parameters
 
-| Parameter       | Type     | Default                         | Description                                               |
-| --------------- | -------- | ------------------------------- | --------------------------------------------------------- |
-| `map_path`      | `string` | `.../maps/map.pcd`              | Path to the PCD map file.                                 |
-| `mission_path`  | `string` | `.../missions/exam_example.csv` | Path to the Mission CSV file containing target waypoints. |
-| `voxel_size`    | `double` | `0.25`                          | Voxel leaf size / spatial resolution in meters.           |
-| `safety_radius` | `double` | `0.60`                          | Obstacle dilation safety radius in meters.                |
+| Parameter       | Type     |                                                             Default | Description                          |
+| --------------- | -------- | ------------------------------------------------------------------: | ------------------------------------ |
+| `map_path`      | `string` |              `/home/user/ros2_ws/src/my_drone_control/maps/map.pcd` | Path to the PCD map file.            |
+| `mission_path`  | `string` | `/home/user/ros2_ws/src/my_drone_control/missions/exam_example.csv` | Path to the mission CSV file.        |
+| `voxel_size`    | `double` |                                                              `0.25` | Voxel-grid resolution in meters.     |
+| `safety_radius` | `double` |                                                              `0.60` | Obstacle inflation radius in meters. |
+
+> **Note:** The default paths are absolute paths from the development workspace and may need to be changed when the package is used in another workspace or on another computer.
 
 ---
 
-## Mission Planning Pipeline
-
-The complete planning pipeline can be summarized as:
+## 5. Mission Pipeline
 
 ```text
-             PCD Map
-                |
-                v
-        Load Point Cloud
-                |
-                v
-        Voxel Grid (0.25 m)
-                |
-                v
-       3D Obstacle Inflation
-          (0.60 m radius)
-                |
-                v
-       3D Occupancy Map
-                |
-                |
-        Mission CSV File
-                |
-                v
-        Sequential Waypoints
-                |
-                v
-          3D A* Planning
-                |
-                v
-       Line-of-Sight Simplification
-                |
-                v
-       Complete Mission Path
-                |
-                v
-       /planned_commands
-                |
-                v
-           Drone Controller
+                    PCD Map File
+                         |
+                         v
+               Load Point Cloud (PCL)
+                         |
+                         v
+              Voxel Grid (0.25 m)
+                         |
+                         v
+             Occupied Voxel Set
+                         |
+                         v
+              3D Obstacle Inflation
+                  (0.60 m radius)
+                         |
+                         v
+              Inflated Occupancy Map
+                         |
+              Mission CSV / Waypoints
+                         |
+                         v
+               Sequential 3D A*
+                         |
+                         v
+             Line-of-Sight Shortcutting
+                         |
+                         v
+              /planned_commands (Path)
+                         |
+                         v
+                  Drone Controller
+```
+
+---
+
+## 6. Implementation Overview
+
+The main processing stages implemented by `MapPlannerNode` are:
+
+1. Read ROS 2 parameters.
+2. Load the PCD point cloud.
+3. Calculate the map coordinate bounds.
+4. Downsample the point cloud using `pcl::VoxelGrid`.
+5. Convert downsampled points into occupied voxel indices.
+6. Inflate occupied voxels using the configured safety radius.
+7. Publish the raw, voxelized, and inflated point clouds.
+8. Load mission waypoints from CSV.
+9. Convert consecutive waypoint coordinates into voxel indices.
+10. Run 3D A* between each pair of waypoints.
+11. Simplify every A* segment using sampled 3D line-of-sight checking.
+12. Combine all simplified segments into one mission path.
+13. Publish the resulting path as `/planned_commands`.
+
+---
+
+## 7. Launch File
+
+The package launch file starts both the planner node and RViz2:
+
+```python
+import os
+
+from ament_index_python.packages import get_package_share_directory
+from launch import LaunchDescription
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    pkg_dir = get_package_share_directory('my_drone_control')
+    rviz_config_file = os.path.join(
+        pkg_dir,
+        'config',
+        'planner_view.rviz'
+    )
+
+    return LaunchDescription([
+        Node(
+            package='my_drone_control',
+            executable='map_planner_node',
+            name='map_planner_node',
+            output='screen'
+        ),
+
+        Node(
+            package='rviz2',
+            executable='rviz2',
+            name='rviz2',
+            arguments=['-d', rviz_config_file],
+            output='screen'
+        )
+    ])
+```
+
+The complete planning and visualization environment can therefore be started with:
+
+```bash
+ros2 launch my_drone_control planner.launch.py
 ```
