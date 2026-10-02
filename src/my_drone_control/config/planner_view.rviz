@@ -6,7 +6,6 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
-        - /Path1
       Splitter Ratio: 0.5
     Tree Height: 827
   - Class: rviz_common/Selection
@@ -74,7 +73,7 @@ Visualization Manager:
       Style: Flat Squares
       Topic:
         Depth: 5
-        Durability Policy: Volatile
+        Durability Policy: Transient Local
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /map_raw
@@ -151,7 +150,7 @@ Visualization Manager:
       Buffer Length: 1
       Class: rviz_default_plugins/Path
       Color: 25; 255; 0
-      Enabled: true
+      Enabled: false
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -174,7 +173,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /planned_commands
-      Value: true
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -221,25 +220,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 14.584701538085938
+      Distance: 8.971221923828125
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -1.1841309070587158
-        Y: 9.130465507507324
-        Z: 0.13879413902759552
-      Focal Shape Fixed Size: true
+        X: 3.886988639831543
+        Y: 7.539398193359375
+        Z: 1.4079190492630005
+      Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.21039853990077972
+      Pitch: 0.1353982537984848
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 5.943579196929932
+      Yaw: 5.878584384918213
     Saved: ~
 Window Geometry:
   Displays:

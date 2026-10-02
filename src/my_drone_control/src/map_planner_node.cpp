@@ -140,6 +140,13 @@ private:
       max_z_ = std::max(max_z_, static_cast<double>(pt.z));
     }
 
+    RCLCPP_INFO(this->get_logger(),
+        "Map bounds: X[%.2f, %.2f] Y[%.2f, %.2f] Z[%.2f, %.2f]",
+        min_x_, max_x_,
+        min_y_, max_y_,
+        min_z_, max_z_
+    );
+
     // Voxel grid filtering & 3D inflation
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_voxels(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::VoxelGrid<pcl::PointXYZ> sor;
@@ -173,6 +180,8 @@ private:
     publish_cloud(map_pub_, cloud);
     publish_cloud(voxel_pub_, cloud_voxels);
     publish_cloud(inflated_pub_, inflated_cloud);
+
+    RCLCPP_INFO(this->get_logger(), "Occupied voxel count: %zu", occupied_grid_.size());
 
     // 2. Load Mission CSV
     std::vector<Waypoint> mission = loadMissionCSV(mission_path);

@@ -4,34 +4,52 @@ A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle 
 
 ---
 
-## 1. Technical Documentation & Specifications (A1.1 & A1.4)
+## A1.1 — Map processing and path planning
 
-### Map Processing & Representation (1.5 pts)
+### 1. Map loading (1.5 pts)
 
 * **Map Source**: FEI LRS Point Cloud (`maps/map.pcd`).
 
-* **Loader**: Implemented using the Point Cloud Library (`pcl::io::loadPCDFile`). The raw PCD data is loaded into a `pcl::PointCloud<pcl::PointXYZ>` structure.
+* **Loader**: The map is loaded using the Point Cloud Library (PCL)
+  through `pcl::io::loadPCDFile`. The raw PCD file is stored as a
+  `pcl::PointCloud<pcl::PointXYZ>`.
 
 * **Downsampling Strategy**: The raw point cloud is downsampled using a 3D Voxel Grid filter (`pcl::VoxelGrid`) with a configurable leaf size of **0.25 m by default**.
 
-* **3D Spatial Representation**: Each downsampled point is converted into a discrete 3D voxel index represented by `Index3D`. Occupied voxels are stored in an `unordered_set`, providing average-case $O(1)$ occupancy lookup.
+* **3D Spatial Representation**: Each downsampled point is converted
+  into a discrete 3D voxel represented by `Index3D`, containing
+  integer `x`, `y`, and `z` indices. Occupied voxels are stored in an
+  `unordered_set<Index3D, Index3DHash>`, providing average-case
+  $O(1)$ occupancy lookup.
+
 
 * **Coordinate Conversion**:
 
   * World coordinates are converted to voxel indices using `pointToIndex()`.
   * Voxel indices are converted back to voxel-center coordinates using `indexToPoint()`.
 
+![3D voxel representation of the FEI LRS map](readme_data/voxel_grid.png)
+
+*Figure 1: Raw FEI LRS point cloud and its 3D voxel-grid representation
+visualized together in RViz. The map is represented directly in X, Y
+and Z rather than using stacked 2D layers.*
+
 #### Measured Map Metrics
 
 * **World Bounding Box**:
-
-  * $X \in [-1.25, 14.85]$ meters
-  * $Y \in [-0.85, 11.20]$ meters
-  * $Z \in [0.00, 6.10]$ meters
+  - $X \in [-0.30, 17.95]$ m
+  - $Y \in [-1.15, 13.20]$ m
+  - $Z \in [0.00, 5.95]$ m
 
 * **Spatial Resolution**: $0.25\text{ m}$ voxel leaf size.
 
-* **Spatial Occupancy Query**: Average-case $O(1)$ lookup using `isOccupied(const Index3D& idx)` and the underlying `unordered_set`.
+* **Occupied Voxel Count**: $16482$ Reported from
+  `occupied_grid_.size()` after voxelization.
+
+* **Spatial Occupancy Query**: A world-space coordinate is converted
+  to an `Index3D` using `pointToIndex()` and checked against the
+  occupancy representation. The underlying hash lookup provides
+  average-case $O(1)$ complexity.
 
 ---
 
