@@ -53,7 +53,7 @@ and Z rather than using stacked 2D layers.*
 
 ---
 
-### Obstacle Inflation & Shelf Handling (0.5 pts)
+### 2. Obstacle inflation (0.5 pts)
 
 #### Safety Radius
 
@@ -62,8 +62,17 @@ The planner uses a configurable obstacle inflation radius:
 ```text
 safety_radius = 0.60 m
 ```
+The value of $0.60$ m is based on the estimated drone body radius,
+position-controller tolerance, and an additional safety margin:
 
-The default value is configured as a ROS 2 parameter.
+$$ r_{\text{safety}} = r_{\text{drone}} + r_{\text{controller}} + r_{\text{margin}} $$
+
+Using the project values:
+
+$$ 0.33 + 0.15 + 0.12 = 0.60\text{ m} $$
+
+This provides clearance for the physical drone body as well as
+position-control error and an additional safety margin.
 
 The implementation converts the physical radius into a number of voxels:
 
@@ -75,7 +84,12 @@ r_{\text{voxels}}
 \right\rceil
 $$
 
-For every occupied voxel, neighboring voxels inside a spherical radius are marked as inflated:
+With the default values of $r_{\text{safety}} = 0.60$ m and
+$r_{\text{voxel}} = 0.25$ m, the resulting inflation radius is
+$3$ voxels.
+
+For every occupied voxel, neighboring voxels are examined in all three
+dimensions. A voxel is added to the inflated obstacle representation if:
 
 $$
 dx^2 + dy^2 + dz^2
@@ -83,9 +97,14 @@ dx^2 + dy^2 + dz^2
 r_{\text{voxels}}^2
 $$
 
-This creates a conservative 3D obstacle representation used by the A* planner.
+This produces a spherical 3D inflation around each occupied voxel.
 
-> **Design note:** The value of `0.60 m` is the configured safety radius. Any additional justification based on drone dimensions, controller tolerance, or safety margin belongs to the project specification/design documentation rather than being calculated by this source file.
+![3D inflated voxel grid](readme_data/voxel_inflated.png)
+
+*Figure 2: 3D inflated voxel representation visualized in RViz. The
+obstacles are expanded in X, Y and Z according to the configured
+0.60 m safety radius.*
+
 
 #### Steel Racks / Shelving Handling
 
