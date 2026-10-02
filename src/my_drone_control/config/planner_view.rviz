@@ -1,395 +1,261 @@
-# My Drone Control — Map Processing and Mission Path Planning
-
-A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle inflation, spatial occupancy querying, mission CSV waypoint parsing, 3D A* path planning, and line-of-sight path post-processing for autonomous drone navigation in hangar environments.
-
----
-
-## 1. Technical Documentation & Specifications (A1.1 & A1.4)
-
-### Map Processing & Representation (1.5 pts)
-
-* **Map Source**: FEI LRS Point Cloud (`maps/map.pcd`).
-
-* **Loader**: Implemented using the Point Cloud Library (`pcl::io::loadPCDFile`). The raw PCD data is loaded into a `pcl::PointCloud<pcl::PointXYZ>` structure.
-
-* **Downsampling Strategy**: The raw point cloud is downsampled using a 3D Voxel Grid filter (`pcl::VoxelGrid`) with a configurable leaf size of **0.25 m by default**.
-
-* **3D Spatial Representation**: Each downsampled point is converted into a discrete 3D voxel index represented by `Index3D`. Occupied voxels are stored in an `unordered_set`, providing average-case $O(1)$ occupancy lookup.
-
-* **Coordinate Conversion**:
-
-  * World coordinates are converted to voxel indices using `pointToIndex()`.
-  * Voxel indices are converted back to voxel-center coordinates using `indexToPoint()`.
-
-#### Measured Map Metrics
-
-* **World Bounding Box**:
-
-  * $X \in [-1.25, 14.85]$ meters
-  * $Y \in [-0.85, 11.20]$ meters
-  * $Z \in [0.00, 6.10]$ meters
-
-* **Spatial Resolution**: $0.25\text{ m}$ voxel leaf size.
-
-* **Spatial Occupancy Query**: Average-case $O(1)$ lookup using `isOccupied(const Index3D& idx)` and the underlying `unordered_set`.
-
----
-
-### Obstacle Inflation & Shelf Handling (0.5 pts)
-
-#### Safety Radius
-
-The planner uses a configurable obstacle inflation radius:
-
-```text
-safety_radius = 0.60 m
-```
-
-The default value is configured as a ROS 2 parameter.
-
-The implementation converts the physical radius into a number of voxels:
-
-$$
-r_{\text{voxels}}
-=
-\left\lceil
-\frac{r_{\text{safety}}}{r_{\text{voxel}}}
-\right\rceil
-$$
-
-For every occupied voxel, neighboring voxels inside a spherical radius are marked as inflated:
-
-$$
-dx^2 + dy^2 + dz^2
-\leq
-r_{\text{voxels}}^2
-$$
-
-This creates a conservative 3D obstacle representation used by the A* planner.
-
-> **Design note:** The value of `0.60 m` is the configured safety radius. Any additional justification based on drone dimensions, controller tolerance, or safety margin belongs to the project specification/design documentation rather than being calculated by this source file.
-
-#### Steel Racks / Shelving Handling
-
-Steel shelving and other obstacles represented by the point cloud are converted into occupied voxels and then expanded using the 3D spherical inflation process.
-
-The inflation can fill small gaps between nearby occupied voxels, producing a more conservative obstacle representation. The A* planner then treats the resulting inflated voxels as occupied.
-
----
-
-### 3D Advanced Path Planning — A* (2.0 pts)
-
-* **Algorithm**: 3D A* grid search using a **26-connected neighborhood**. Each voxel can have up to 26 neighboring voxels.
-
-* **Search Space**: The planner operates directly on the inflated voxel grid.
-
-* **Heuristic**: 3D Euclidean distance:
-
-$$
-h(n)
-=
-\sqrt{
-\Delta x^2 +
-\Delta y^2 +
-\Delta z^2
-}
-$$
-
-* **A* Cost Function**:
-
-$$
-f(n) = g(n) + h(n)
-$$
-
-where:
-
-* $g(n)$ is the accumulated cost from the start voxel to node $n$.
-
-* $h(n)$ is the Euclidean heuristic estimate from node $n$ to the goal.
-
-* $f(n)$ is the estimated total path cost through node $n$.
-
-* **Movement Cost**:
-
-$$
-c(n,n')
-=
-\sqrt{
-\Delta x^2 +
-\Delta y^2 +
-\Delta z^2
-}
-$$
-
-This produces:
-
-* Axis-aligned movement: $1$
-
-* 2D diagonal movement: $\sqrt{2}$
-
-* 3D diagonal movement: $\sqrt{3}$
-
-* **Open Set**: A priority queue stores nodes ordered by their lowest $f$ score.
-
-* **Closed Set**: An `unordered_set` stores already expanded voxels.
-
-* **Cost Tracking**: `g_score` stores the best known cost from the start to each voxel.
-
-* **Path Reconstruction**: `came_from` stores the predecessor of each voxel. When the goal is reached, the path is reconstructed backwards and then reversed.
-
-* **Collision Checking**: Neighboring voxels contained in the inflated occupancy grid are rejected.
-
-* **Sequential Waypoint Planning**: The mission CSV is interpreted as an ordered list of waypoints. A separate A* search is performed between every pair of consecutive waypoints.
-
-* **Unreachable Goals**: If the start or goal voxel is occupied, or the A* search cannot reach the goal, an empty path is returned and mission planning stops.
-
-* **Performance Measurement**: The complete mission planning process is timed using `std::chrono::high_resolution_clock` and the elapsed time is reported in milliseconds.
-
----
-
-### Mission CSV Processing
-
-Mission waypoints are loaded from a CSV file.
-
-Expected format:
-
-```text
-x,y,z,precision,task
-```
-
-For example:
-
-```text
-0.0,0.0,1.0,0.1,takeoff
-4.0,2.0,2.0,0.1,inspection
-8.0,4.0,2.5,0.1,landing
-```
-
-The parser:
-
-* skips empty lines,
-* skips lines beginning with `#`,
-* skips the header row,
-* converts `x`, `y`, and `z` to `double`,
-* stores `precision` and `task` as strings,
-* ignores malformed numeric rows.
-
-Currently, only the waypoint coordinates (`x`, `y`, `z`) are used by the path planner. The `precision` and `task` values are parsed and stored but do not currently affect the A* search or the published path.
-
----
-
-### Path Post-Processing & Shortcutting (1.0 pt)
-
-The raw A* path consists of neighboring voxels and may contain many unnecessary intermediate points.
-
-The planner therefore performs a second processing stage using `simplifyPath()`.
-
-* **Line-of-Sight Shortcutting**: The simplifier attempts to connect the current path point directly to the furthest future point that can be reached without intersecting an occupied inflated voxel.
-
-* **3D Segment Checking**: `isLineOfSightFree()` samples positions along the 3D segment between two voxel indices.
-
-* **Voxel Conversion**: The sampled coordinates are rounded to the nearest voxel index.
-
-* **Collision Check**: Every sampled voxel is checked against the inflated occupancy grid.
-
-* **Greedy Simplification**: For every current point, the algorithm searches for the furthest future point with a clear line of sight and adds that point to the simplified path.
-
-This is a sampled 3D line-of-sight check rather than a classical DDA voxel traversal algorithm.
-
-#### Waypoint Reduction Evidence
-
-| Route Test Case          | Mission Source                   | Raw A* Points | Simplified Points | Point Reduction | Execution Time | Safety Check |
-| ------------------------ | -------------------------------- | ------------: | ----------------: | --------------: | -------------: | ------------ |
-| **Single Waypoint Pair** | `(0, 0, 1) -> (8, 4, 2.5)`       |            42 |                 3 |       **92.8%** |       ~14.2 ms | PASSED       |
-| **Exam Mission 1**       | `exam_example.csv` (7 waypoints) |           128 |                11 |       **91.4%** |       ~48.6 ms | PASSED       |
-
-The reported execution time measures the complete sequential mission planning process, including the A* searches and path simplification.
-
----
-
-## 2. Prerequisites & Build Instructions
-
-Ensure that ROS 2, PCL, and the package dependencies are installed.
-
-Build the package with:
-
-```bash
-cd /home/user/ros2_ws
-
-colcon build --packages-select my_drone_control
-
-source install/setup.bash
-```
-
----
-
-## 3. How to Run
-
-### Step 1: Launch the Planner and RViz
-
-The launch file starts both the `map_planner_node` and RViz2 with the predefined RViz configuration:
-
-```bash
-ros2 launch my_drone_control planner.launch.py
-```
-
-The launch file starts:
-
-* `map_planner_node`
-* RViz2
-* `config/planner_view.rviz`
-
-No additional `ros2 run my_drone_control map_planner_node` command is required when using the launch file.
-
-### Step 2: Run with a Custom Mission CSV
-
-The planner can also be started directly with a different mission file:
-
-```bash
-ros2 run my_drone_control map_planner_node \
-  --ros-args \
-  -p mission_path:=/path/to/custom_mission.csv
-```
-
-The same approach can be used to override other ROS parameters:
-
-```bash
-ros2 run my_drone_control map_planner_node \
-  --ros-args \
-  -p map_path:=/path/to/map.pcd \
-  -p mission_path:=/path/to/mission.csv \
-  -p voxel_size:=0.25 \
-  -p safety_radius:=0.60
-```
-
----
-
-## 4. ROS 2 Interface
-
-### Published Topics
-
-All publishers use a QoS profile with depth `1` and `transient_local` durability.
-
-| Topic               | Type                          | Description                                                    |
-| ------------------- | ----------------------------- | -------------------------------------------------------------- |
-| `/map_raw`          | `sensor_msgs/msg/PointCloud2` | Original PCD point cloud.                                      |
-| `/voxel_grid`       | `sensor_msgs/msg/PointCloud2` | Downsampled point cloud produced by the PCL VoxelGrid filter.  |
-| `/voxel_inflated`   | `sensor_msgs/msg/PointCloud2` | Inflated 3D occupancy representation.                          |
-| `/planned_commands` | `nav_msgs/msg/Path`           | Final simplified 3D path generated from the mission waypoints. |
-
-All published map and path messages use the `map` frame.
-
-### Parameters
-
-| Parameter       | Type     |                                                             Default | Description                          |
-| --------------- | -------- | ------------------------------------------------------------------: | ------------------------------------ |
-| `map_path`      | `string` |              `/home/user/ros2_ws/src/my_drone_control/maps/map.pcd` | Path to the PCD map file.            |
-| `mission_path`  | `string` | `/home/user/ros2_ws/src/my_drone_control/missions/exam_example.csv` | Path to the mission CSV file.        |
-| `voxel_size`    | `double` |                                                              `0.25` | Voxel-grid resolution in meters.     |
-| `safety_radius` | `double` |                                                              `0.60` | Obstacle inflation radius in meters. |
-
-> **Note:** The default paths are absolute paths from the development workspace and may need to be changed when the package is used in another workspace or on another computer.
-
----
-
-## 5. Mission Pipeline
-
-```text
-                    PCD Map File
-                         |
-                         v
-               Load Point Cloud (PCL)
-                         |
-                         v
-              Voxel Grid (0.25 m)
-                         |
-                         v
-             Occupied Voxel Set
-                         |
-                         v
-              3D Obstacle Inflation
-                  (0.60 m radius)
-                         |
-                         v
-              Inflated Occupancy Map
-                         |
-              Mission CSV / Waypoints
-                         |
-                         v
-               Sequential 3D A*
-                         |
-                         v
-             Line-of-Sight Shortcutting
-                         |
-                         v
-              /planned_commands (Path)
-                         |
-                         v
-                  Drone Controller
-```
-
----
-
-## 6. Implementation Overview
-
-The main processing stages implemented by `MapPlannerNode` are:
-
-1. Read ROS 2 parameters.
-2. Load the PCD point cloud.
-3. Calculate the map coordinate bounds.
-4. Downsample the point cloud using `pcl::VoxelGrid`.
-5. Convert downsampled points into occupied voxel indices.
-6. Inflate occupied voxels using the configured safety radius.
-7. Publish the raw, voxelized, and inflated point clouds.
-8. Load mission waypoints from CSV.
-9. Convert consecutive waypoint coordinates into voxel indices.
-10. Run 3D A* between each pair of waypoints.
-11. Simplify every A* segment using sampled 3D line-of-sight checking.
-12. Combine all simplified segments into one mission path.
-13. Publish the resulting path as `/planned_commands`.
-
----
-
-## 7. Launch File
-
-The package launch file starts both the planner node and RViz2:
-
-```python
-import os
-
-from ament_index_python.packages import get_package_share_directory
-from launch import LaunchDescription
-from launch_ros.actions import Node
-
-
-def generate_launch_description():
-    pkg_dir = get_package_share_directory('my_drone_control')
-    rviz_config_file = os.path.join(
-        pkg_dir,
-        'config',
-        'planner_view.rviz'
-    )
-
-    return LaunchDescription([
-        Node(
-            package='my_drone_control',
-            executable='map_planner_node',
-            name='map_planner_node',
-            output='screen'
-        ),
-
-        Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2',
-            arguments=['-d', rviz_config_file],
-            output='screen'
-        )
-    ])
-```
-
-The complete planning and visualization environment can therefore be started with:
-
-```bash
-ros2 launch my_drone_control planner.launch.py
-```
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 78
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Status1
+        - /Path1
+      Splitter Ratio: 0.5
+    Tree Height: 827
+  - Class: rviz_common/Selection
+    Name: Selection
+  - Class: rviz_common/Tool Properties
+    Expanded:
+      - /2D Goal Pose1
+      - /Publish Point1
+    Name: Tool Properties
+    Splitter Ratio: 0.5886790156364441
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+  - Class: rviz_common/Time
+    Experimental: false
+    Name: Time
+    SyncMode: 0
+    SyncSource: PointCloud2
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 160; 160; 164
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 10
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 10
+        Min Value: -10
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: Intensity
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: PointCloud2
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.009999999776482582
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /map_raw
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 5.950414657592773
+        Min Value: 0
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: AxisColor
+      Decay Time: 0
+      Enabled: true
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: PointCloud2
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.05000000074505806
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /voxel_grid
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: true
+    - Alpha: 1
+      Autocompute Intensity Bounds: true
+      Autocompute Value Bounds:
+        Max Value: 6.625
+        Min Value: -0.625
+        Value: true
+      Axis: Z
+      Channel Name: intensity
+      Class: rviz_default_plugins/PointCloud2
+      Color: 255; 255; 255
+      Color Transformer: AxisColor
+      Decay Time: 0
+      Enabled: false
+      Invert Rainbow: false
+      Max Color: 255; 255; 255
+      Max Intensity: 4096
+      Min Color: 0; 0; 0
+      Min Intensity: 0
+      Name: PointCloud2
+      Position Transformer: XYZ
+      Selectable: true
+      Size (Pixels): 3
+      Size (m): 0.029999999329447746
+      Style: Flat Squares
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /voxel_inflated
+      Use Fixed Frame: true
+      Use rainbow: true
+      Value: false
+    - Alpha: 1
+      Buffer Length: 1
+      Class: rviz_default_plugins/Path
+      Color: 25; 255; 0
+      Enabled: true
+      Head Diameter: 0.30000001192092896
+      Head Length: 0.20000000298023224
+      Length: 0.30000001192092896
+      Line Style: Lines
+      Line Width: 0.029999999329447746
+      Name: Path
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Pose Color: 255; 85; 255
+      Pose Style: None
+      Radius: 0.029999999329447746
+      Shaft Diameter: 0.10000000149011612
+      Shaft Length: 0.10000000149011612
+      Topic:
+        Depth: 5
+        Durability Policy: Transient Local
+        Filter size: 10
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /planned_commands
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: map
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+    - Class: rviz_default_plugins/SetInitialPose
+      Covariance x: 0.25
+      Covariance y: 0.25
+      Covariance yaw: 0.06853891909122467
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /initialpose
+    - Class: rviz_default_plugins/SetGoal
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /goal_pose
+    - Class: rviz_default_plugins/PublishPoint
+      Single click: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /clicked_point
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 14.584701538085938
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: -1.1841309070587158
+        Y: 9.130465507507324
+        Z: 0.13879413902759552
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.21039853990077972
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 5.943579196929932
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 1131
+  Hide Left Dock: false
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd000000040000000000000156000003c9fc0200000008fb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005d00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed000001df00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003f000003c9000000cc00fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261000000010000010f000003c9fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073010000003f000003c9000000a900fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000073e0000003efc0100000002fb0000000800540069006d006501000000000000073e0000026f00fffffffb0000000800540069006d00650100000000000004500000000000000000000004cd000003c900000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Selection:
+    collapsed: false
+  Time:
+    collapsed: false
+  Tool Properties:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1854
+  X: 66
+  Y: 32
