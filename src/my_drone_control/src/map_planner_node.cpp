@@ -2,6 +2,7 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
@@ -63,8 +64,9 @@ public:
     voxel_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("voxel_grid", qos_profile);
     inflated_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("voxel_inflated", qos_profile);
     
-    // Target topic for controller
+    // Path & Mission Marker publishers
     planned_commands_pub_ = this->create_publisher<nav_msgs::msg::Path>("planned_commands", qos_profile);
+    mission_markers_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("mission_markers", qos_profile);
 
     process_and_plan();
   }
@@ -98,14 +100,14 @@ private:
 
     std::string line;
     while (std::getline(file, line)) {
-      if (line.empty() || line[0] == '#') continue; // Skip comments/empty lines
+      if (line.empty() || line[0] == '#') continue;
       std::stringstream ss(line);
       std::string x_s, y_s, z_s, prec, task;
 
       if (std::getline(ss, x_s, ',') && std::getline(ss, y_s, ',') &&
           std::getline(ss, z_s, ',') && std::getline(ss, prec, ',') &&
           std::getline(ss, task, ',')) {
-        if (x_s == "x" || x_s == "X") continue; // Header row
+        if (x_s == "x" || x_s == "X") continue;
         try {
           waypoints.push_back({std::stod(x_s), std::stod(y_s), std::stod(z_s), prec, task});
         } catch (...) {
@@ -114,6 +116,65 @@ private:
       }
     }
     return waypoints;
+  }
+
+  void publish_mission_markers(const std::vector<Waypoint>& waypoints) {
+    visualization_msgs::msg::MarkerArray marker_array;
+    
+    for (size_t i = 0; i < waypoints.size(); ++i) {
+      // 1. Sphere Marker for Waypoint Position
+      visualization_msgs::msg::Marker sphere;
+      sphere.header.frame_id = "map";
+      sphere.header.stamp = this->now();
+      sphere.ns = "mission_waypoints";
+      sphere.id = static_cast<int>(i);
+      sphere.type = visualization_msgs::msg::Marker::SPHERE;
+      sphere.action = visualization_msgs::msg::Marker::ADD;
+
+      sphere.pose.position.x = waypoints[i].x;
+      sphere.pose.position.y = waypoints[i].y;
+      sphere.pose.position.z = waypoints[i].z;
+      sphere.pose.orientation.w = 1.0;
+
+      sphere.scale.x = 0.4;
+      sphere.scale.y = 0.4;
+      sphere.scale.z = 0.4;
+
+      // Color coding: Start = Green, End = Red, Waypoints = Yellow
+      if (i == 0) {
+        sphere.color.r = 0.0f; sphere.color.g = 1.0f; sphere.color.b = 0.0f; sphere.color.a = 0.9f;
+      } else if (i == waypoints.size() - 1) {
+        sphere.color.r = 1.0f; sphere.color.g = 0.0f; sphere.color.b = 0.0f; sphere.color.a = 0.9f;
+      } else {
+        sphere.color.r = 1.0f; sphere.color.g = 0.8f; sphere.color.b = 0.0f; sphere.color.a = 0.9f;
+      }
+
+      // 2. Text Label Marker (Index + Task)
+      visualization_msgs::msg::Marker text;
+      text.header.frame_id = "map";
+      text.header.stamp = this->now();
+      text.ns = "mission_labels";
+      text.id = static_cast<int>(i + 1000);
+      text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+      text.action = visualization_msgs::msg::Marker::ADD;
+
+      text.pose.position.x = waypoints[i].x;
+      text.pose.position.y = waypoints[i].y;
+      text.pose.position.z = waypoints[i].z + 0.35; // Offset text above sphere
+      text.pose.orientation.w = 1.0;
+
+      text.scale.z = 0.25; // Text height
+      text.color.r = 1.0f; text.color.g = 1.0f; text.color.b = 1.0f; text.color.a = 1.0f;
+
+      std::stringstream label;
+      label << "WP" << i << " (" << waypoints[i].task << ")";
+      text.text = label.str();
+
+      marker_array.markers.push_back(sphere);
+      marker_array.markers.push_back(text);
+    }
+
+    mission_markers_pub_->publish(marker_array);
   }
 
   void process_and_plan() {
@@ -139,13 +200,6 @@ private:
       min_z_ = std::min(min_z_, static_cast<double>(pt.z));
       max_z_ = std::max(max_z_, static_cast<double>(pt.z));
     }
-
-    RCLCPP_INFO(this->get_logger(),
-        "Map bounds: X[%.2f, %.2f] Y[%.2f, %.2f] Z[%.2f, %.2f]",
-        min_x_, max_x_,
-        min_y_, max_y_,
-        min_z_, max_z_
-    );
 
     // Voxel grid filtering & 3D inflation
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_voxels(new pcl::PointCloud<pcl::PointXYZ>);
@@ -181,9 +235,7 @@ private:
     publish_cloud(voxel_pub_, cloud_voxels);
     publish_cloud(inflated_pub_, inflated_cloud);
 
-    RCLCPP_INFO(this->get_logger(), "Occupied voxel count: %zu", occupied_grid_.size());
-
-    // 2. Load Mission CSV
+    // 2. Load & Publish Mission Markers
     std::vector<Waypoint> mission = loadMissionCSV(mission_path);
     if (mission.size() < 2) {
       RCLCPP_ERROR(this->get_logger(), "Mission CSV needs at least 2 waypoints!");
@@ -191,6 +243,7 @@ private:
     }
 
     RCLCPP_INFO(this->get_logger(), "Loaded mission with %zu waypoints from: %s", mission.size(), mission_path.c_str());
+    publish_mission_markers(mission);
 
     // 3. Plan A* between sequential mission waypoints
     std::vector<Index3D> full_path;
@@ -347,6 +400,7 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr voxel_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr inflated_pub_;
   rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr planned_commands_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr mission_markers_pub_;
 };
 
 int main(int argc, char** argv) {

@@ -26,6 +26,7 @@ find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(mavros_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
+find_package(visualization_msgs REQUIRED)
 
 # 2. Find System PCL Dependency
 find_package(PCL REQUIRED COMPONENTS common io filters)
@@ -60,6 +61,7 @@ ament_target_dependencies(map_planner_node
   geometry_msgs
   nav_msgs
   pcl_conversions
+  visualization_msgs
 )
 
 # Link system PCL libraries

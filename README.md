@@ -114,7 +114,7 @@ The inflation can fill small gaps between nearby occupied voxels, producing a mo
 
 ---
 
-### 3D Advanced Path Planning — A* (2.0 pts)
+### 3. Advanced planning algorithm  — A* (2.0 pts)
 
 * **Algorithm**: 3D A* grid search using a **26-connected neighborhood**. Each voxel can have up to 26 neighboring voxels.
 
