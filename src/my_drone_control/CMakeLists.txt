@@ -21,61 +21,62 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
-find_package(sensor_msgs REQUIRED)
-find_package(geometry_msgs REQUIRED)
-find_package(nav_msgs REQUIRED)
-find_package(mavros_msgs REQUIRED)
-find_package(pcl_conversions REQUIRED)
+find_package(rosidl_default_generators REQUIRED)
 
-# Find System PCL dependency
-find_package(PCL REQUIRED)
-
-# Include directories
-include_directories(
-  include
-  ${PCL_INCLUDE_DIRS}
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "msg/PlannedCommand.msg"
+  "msg/PlannedMission.msg"
 )
 
 # -----------------------------------------------------------------------------
-# Node 1: takeoff_drone
+# Library: flight_assistant
 # -----------------------------------------------------------------------------
-add_executable(takeoff_drone src/takeoff_drone.cpp)
-<<<<<<< HEAD
-target_include_directories(takeoff_drone PUBLIC
-  ${CMAKE_CURRENT_SOURCE_DIR}/include
+add_library(flight_assistant_lib src/flight_assistant.cpp)
+target_include_directories(flight_assistant_lib PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
 )
-ament_target_dependencies(takeoff_drone rclcpp mavros_msgs std_msgs)
-install(TARGETS takeoff_drone
-=======
-ament_target_dependencies(takeoff_drone
+set_target_properties(flight_assistant_lib PROPERTIES
+  INSTALL_RPATH "$ORIGIN"
+  BUILD_RPATH "$ORIGIN"
+)
+
+# -----------------------------------------------------------------------------
+# Node: flight_assistant_node
+# -----------------------------------------------------------------------------
+add_executable(flight_assistant_node src/flight_assistant_node.cpp)
+target_link_libraries(flight_assistant_node
+  flight_assistant_lib
+)
+set_target_properties(flight_assistant_node PROPERTIES
+  INSTALL_RPATH "$ORIGIN"
+  BUILD_RPATH "$ORIGIN"
+)
+
+# -----------------------------------------------------------------------------
+# Node: navigation_node
+# -----------------------------------------------------------------------------
+add_executable(navigation_node src/navigation.cpp)
+target_link_libraries(navigation_node
+  flight_assistant_lib
+)
+ament_target_dependencies(navigation_node
   rclcpp
-  mavros_msgs
   std_msgs
 )
-
-# -----------------------------------------------------------------------------
-# Node 2: map_planner_node
-# -----------------------------------------------------------------------------
-add_executable(map_planner_node src/map_planner_node.cpp)
-target_link_libraries(map_planner_node
-  ${PCL_LIBRARIES}
-)
-ament_target_dependencies(map_planner_node
-  rclcpp
-  sensor_msgs
-  geometry_msgs
-  pcl_conversions
-)
+rosidl_target_interfaces(navigation_node
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
 # -----------------------------------------------------------------------------
 # Installation
 # -----------------------------------------------------------------------------
 install(TARGETS
-  takeoff_drone
-  map_planner_node
->>>>>>> 6c98e7b51f01338ecce985fa490b6dc1ee794d91
+  flight_assistant_lib
+  flight_assistant_node
+  navigation_node
   DESTINATION lib/${PROJECT_NAME}
 )
+
 install(DIRECTORY include/
   DESTINATION include
 )

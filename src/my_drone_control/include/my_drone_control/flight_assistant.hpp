@@ -21,10 +21,12 @@ public:
 
   bool takeoff(double altitude_m = 1.0);
   bool moveTo(double x, double y, double z, const std::string &precision = "soft");
+  bool moveToMapPoint(double map_x, double map_y, double map_z, const std::string &precision = "soft");
   bool rotate(double yaw_deg);
   bool changeAltitude(double altitude_m, const std::string &precision = "soft");
   bool land();
   bool endMission();
+  void setMapOrigin(double x, double y, double z);
 
   bool execute(const PlannedCommand &command);
 
@@ -34,6 +36,9 @@ private:
   bool mission_active_ = false;
   double current_altitude_m_ = 0.0;
   double current_yaw_deg_ = 0.0;
+  double map_origin_x_ = 0.0;
+  double map_origin_y_ = 0.0;
+  double map_origin_z_ = 0.0;
 };
 
 }  // namespace my_drone_control

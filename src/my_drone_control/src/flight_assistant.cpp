@@ -5,6 +5,27 @@
 
 namespace my_drone_control
 {
+namespace
+{
+bool parseYawDegrees(const std::string &task, double &yaw_deg)
+{
+  if (task.rfind("yaw", 0) != 0) {
+    return false;
+  }
+
+  const std::string value = task.substr(3);
+  if (value.empty()) {
+    return false;
+  }
+
+  try {
+    yaw_deg = std::stod(value);
+    return true;
+  } catch (const std::exception &) {
+    return false;
+  }
+}
+}  // namespace
 
 FlightAssistant::FlightAssistant(const std::string &frame_id)
 : frame_id_(frame_id)
@@ -28,10 +49,23 @@ bool FlightAssistant::moveTo(double x, double y, double z, const std::string &pr
   return true;
 }
 
+bool FlightAssistant::moveToMapPoint(double map_x, double map_y, double map_z, const std::string &precision)
+{
+  const double local_x = map_x - map_origin_x_;
+  const double local_y = map_y - map_origin_y_;
+  const double local_z = map_z - map_origin_z_;
+
+  std::cout << "[FlightAssistant] map->local: (" << map_x << ", " << map_y << ", " << map_z << ") -> ("
+            << local_x << ", " << local_y << ", " << local_z << ")" << std::endl;
+  return moveTo(local_x, local_y, local_z, precision);
+}
+
 bool FlightAssistant::rotate(double yaw_deg)
 {
-  std::cout << "[FlightAssistant] rotate yaw=" << yaw_deg << " deg" << std::endl;
-  current_yaw_deg_ = yaw_deg;
+  const double new_yaw = current_yaw_deg_ + yaw_deg;
+  std::cout << "[FlightAssistant] rotate by " << yaw_deg << " deg"
+            << " (current=" << current_yaw_deg_ << ", new=" << new_yaw << ")" << std::endl;
+  current_yaw_deg_ = new_yaw;
   return true;
 }
 
@@ -57,22 +91,26 @@ bool FlightAssistant::endMission()
   return true;
 }
 
+void FlightAssistant::setMapOrigin(double x, double y, double z)
+{
+  map_origin_x_ = x;
+  map_origin_y_ = y;
+  map_origin_z_ = z;
+}
+
 bool FlightAssistant::execute(const PlannedCommand &command)
 {
   if (command.task == "takeoff") {
     return takeoff(command.z);
   }
 
-  if (command.task == "yaw180" || command.task == "yaw90" || command.task == "yaw270") {
-    double desired_yaw = 0.0;
-    if (command.task == "yaw180") {
-      desired_yaw = 180.0;
-    } else if (command.task == "yaw90") {
-      desired_yaw = 90.0;
-    } else if (command.task == "yaw270") {
-      desired_yaw = 270.0;
+  if (command.task.rfind("yaw", 0) == 0) {
+    double yaw_delta = 0.0;
+    if (!parseYawDegrees(command.task, yaw_delta)) {
+      std::cout << "[FlightAssistant] invalid rotation command: " << command.task << std::endl;
+      return false;
     }
-    return rotate(desired_yaw);
+    return rotate(yaw_delta);
   }
 
   if (command.task == "land") {
@@ -83,14 +121,14 @@ bool FlightAssistant::execute(const PlannedCommand &command)
     if (!land()) {
       return false;
     }
-    return takeoff(command.z);
+    return takeoff(current_altitude_m_ == 0.0 ? command.z : current_altitude_m_);
   }
 
   if (command.task == "-" || command.task.empty()) {
-    return moveTo(command.x, command.y, command.z, command.precision);
+    return moveToMapPoint(command.x, command.y, command.z, command.precision);
   }
 
-  return moveTo(command.x, command.y, command.z, command.precision);
+  return moveToMapPoint(command.x, command.y, command.z, command.precision);
 }
 
 }  // namespace my_drone_control
