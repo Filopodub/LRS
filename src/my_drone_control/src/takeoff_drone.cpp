@@ -3,6 +3,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "mavros_msgs/msg/state.hpp"
 #include "mavros_msgs/srv/command_bool.hpp"
@@ -12,6 +13,7 @@
 #include "std_msgs/msg/float64.hpp"
 
 #include "my_drone_control/flight_assistant.hpp"
+#include "my_drone_control/msg/planned_mission.hpp"
 
 using namespace std::chrono_literals;
 
@@ -49,6 +51,17 @@ public:
     mode_client_ = create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
     arm_client_ = create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
     takeoff_client_ = create_client<mavros_msgs::srv::CommandTOL>("mavros/cmd/takeoff");
+    mission_sub_ = create_subscription<my_drone_control::msg::PlannedMission>(
+      "planned_commands", 10,
+      [this](const my_drone_control::msg::PlannedMission::SharedPtr message) {
+        if (mission_received_) {
+          RCLCPP_WARN(get_logger(), "Ignoring duplicate mission");
+          return;
+        }
+        mission_commands_ = message->commands;
+        mission_received_ = true;
+        RCLCPP_INFO(get_logger(), "Received mission with %zu commands", mission_commands_.size());
+      });
     timer_ = create_wall_timer(100ms, [this]() { control_loop(); });
     start_time_ = now();
   }
@@ -72,9 +85,8 @@ private:
     ARMING,
     TAKING_OFF,
     CLIMBING,
-    MOVING_TO_FIRST_POINT,
-    MOVING_TO_SECOND_POINT,
-    ROTATING
+    EXECUTING_MISSION,
+    MISSION_COMPLETE
   };
 
   void control_loop()
@@ -131,38 +143,78 @@ private:
     if (stage_ == Stage::CLIMBING) {
       if (altitude_received_ && relative_altitude_ >= target_altitude_ - altitude_tolerance_) {
         RCLCPP_INFO(get_logger(), "Takeoff complete at %.2f m relative altitude", relative_altitude_);
-        assistant_->changeAltitude(1.0);
-        assistant_->moveToMapPoint(8.65, 2.02, 1.00);
-        stage_ = Stage::MOVING_TO_FIRST_POINT;
+        if (mission_received_) {
+          stage_ = Stage::EXECUTING_MISSION;
+          start_next_command();
+        } else {
+          RCLCPP_INFO(get_logger(), "Waiting for planned mission");
+        }
       } else if (timed_out()) {
         abort("takeoff altitude was not reached");
       }
       return;
     }
 
-    if (stage_ == Stage::MOVING_TO_FIRST_POINT) {
-      if (assistant_->targetReached("soft")) {
-        RCLCPP_INFO(get_logger(), "First waypoint reached; moving to second waypoint");
-        assistant_->changeAltitude(2.0);
-        assistant_->moveToMapPoint(4.84, 5.37, 2.00);
-        stage_ = Stage::MOVING_TO_SECOND_POINT;
+    if (stage_ == Stage::EXECUTING_MISSION && assistant_->targetReached(current_precision_)) {
+      const auto &command = mission_commands_[mission_index_];
+      if (command.task.rfind("yaw", 0) == 0 && !yaw_applied_) {
+        double yaw_degrees = 0.0;
+        try {
+          yaw_degrees = std::stod(command.task.substr(3));
+        } catch (const std::exception &) {
+          abort("invalid yaw mission command");
+          return;
+        }
+        if (!assistant_->rotate(yaw_degrees)) {
+          abort("failed to apply yaw mission command");
+          return;
+        }
+        yaw_applied_ = true;
+        return;
       }
+
+      RCLCPP_INFO(get_logger(), "Mission command %zu/%zu reached: %s",
+                  mission_index_ + 1, mission_commands_.size(), command.task.c_str());
+      ++mission_index_;
+      start_next_command();
+    }
+  }
+
+  void start_next_command()
+  {
+    while (mission_index_ < mission_commands_.size() &&
+      mission_commands_[mission_index_].task == "takeoff")
+    {
+      ++mission_index_;
+    }
+
+    if (mission_index_ >= mission_commands_.size()) {
+      RCLCPP_INFO(get_logger(), "Mission complete");
+      stage_ = Stage::MISSION_COMPLETE;
+      rclcpp::shutdown();
       return;
     }
 
-    if (stage_ == Stage::MOVING_TO_SECOND_POINT) {
-      if (assistant_->targetReached("soft")) {
-        RCLCPP_INFO(get_logger(), "Second waypoint reached; rotating 180 degrees");
-        assistant_->rotate(180.0);
-        stage_ = Stage::ROTATING;
-      }
+    const auto &command = mission_commands_[mission_index_];
+    current_precision_ = command.precision == "hard" ? "hard" : "soft";
+    yaw_applied_ = false;
+
+    if (command.task == "land") {
+      assistant_->changeAltitude(0.0);
+    } else if (command.task == "landtakeoff") {
+      assistant_->changeAltitude(command.z);
+    } else {
+      assistant_->changeAltitude(command.z);
+    }
+
+    if (!assistant_->moveToMapPoint(command.x, command.y, command.z, current_precision_)) {
+      abort("failed to set mission waypoint");
       return;
     }
 
-    if (stage_ == Stage::ROTATING && assistant_->targetReached("soft")) {
-      RCLCPP_INFO(get_logger(), "Waypoint and yaw action complete");
-        rclcpp::shutdown();
-    }
+    RCLCPP_INFO(get_logger(), "Executing mission command %zu/%zu: x=%.2f y=%.2f z=%.2f task=%s",
+                mission_index_ + 1, mission_commands_.size(), command.x, command.y, command.z,
+                command.task.c_str());
   }
 
   void request_mode()
@@ -262,8 +314,14 @@ private:
   bool takeoff_request_pending_{false};
   bool aborted_{false};
   std::shared_ptr<my_drone_control::FlightAssistant> assistant_;
+  std::vector<my_drone_control::msg::PlannedCommand> mission_commands_;
+  std::size_t mission_index_{0};
+  std::string current_precision_{"soft"};
+  bool mission_received_{false};
+  bool yaw_applied_{false};
   rclcpp::Subscription<mavros_msgs::msg::State>::SharedPtr state_sub_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr pose_sub_;
+  rclcpp::Subscription<my_drone_control::msg::PlannedMission>::SharedPtr mission_sub_;
   rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr altitude_sub_;
   rclcpp::Client<mavros_msgs::srv::SetMode>::SharedPtr mode_client_;
   rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arm_client_;
