@@ -64,8 +64,11 @@ ament_target_dependencies(navigation_node
   rclcpp
   std_msgs
 )
-rosidl_target_interfaces(navigation_node
+rosidl_get_typesupport_target(cpp_typesupport_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(navigation_node
+  "${cpp_typesupport_target}"
+)
 
 # -----------------------------------------------------------------------------
 # Installation
