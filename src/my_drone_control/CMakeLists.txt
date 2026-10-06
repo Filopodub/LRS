@@ -21,6 +21,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(mavros_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -32,6 +33,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 # Library: flight_assistant
 # -----------------------------------------------------------------------------
 add_library(flight_assistant_lib src/flight_assistant.cpp)
+ament_target_dependencies(flight_assistant_lib
+  rclcpp
+  geometry_msgs
+)
 target_include_directories(flight_assistant_lib PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   $<INSTALL_INTERFACE:include>
@@ -71,12 +76,30 @@ target_link_libraries(navigation_node
 )
 
 # -----------------------------------------------------------------------------
+# Node: takeoff_drone
+# -----------------------------------------------------------------------------
+add_executable(takeoff_drone src/takeoff_drone.cpp)
+target_link_libraries(takeoff_drone
+  flight_assistant_lib
+)
+ament_target_dependencies(takeoff_drone
+  rclcpp
+  std_msgs
+  mavros_msgs
+)
+set_target_properties(takeoff_drone PROPERTIES
+  INSTALL_RPATH "$ORIGIN"
+  BUILD_RPATH "$ORIGIN"
+)
+
+# -----------------------------------------------------------------------------
 # Installation
 # -----------------------------------------------------------------------------
 install(TARGETS
   flight_assistant_lib
   flight_assistant_node
   navigation_node
+  takeoff_drone
   DESTINATION lib/${PROJECT_NAME}
 )
 
