@@ -20,10 +20,10 @@ public:
 
     auto mission = my_drone_control::msg::PlannedMission();
     const std::vector<std::tuple<double, double, double, std::string, std::string>> steps = {
-      {0.00, 0.00, 2.00, "soft", "takeoff"},
-      {1.00, 1.00, 1.00, "soft", "yaw180"},
-      {2.65, 0.02, 2.00, "soft", "landtakeoff"},
-      {0.00, 0.00, 3.00, "soft", "land"},
+      {13.00, 7.00, 1.00, "soft", "takeoff"},
+      {9.00, 2.00, 1.00, "soft", "yaw180"},
+      {10.65, 10.02, 2.00, "soft", "landtakeoff"},
+      {13.00, 7.00, 1.00, "hard", "land"},
     };
 
     for (const auto &step : steps) {

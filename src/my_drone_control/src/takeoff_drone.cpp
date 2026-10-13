@@ -21,7 +21,7 @@ class TakeoffDrone : public rclcpp::Node
 {
 public:
   TakeoffDrone()
-  : Node("takeoff_drone"), stage_(Stage::WAITING_FOR_CONNECTION)
+  : Node("takeoff_drone")
   {
     target_altitude_ = declare_parameter<double>("target_altitude", 2.0);
     flight_mode_ = declare_parameter<std::string>("flight_mode", "GUIDED");
@@ -69,7 +69,6 @@ public:
   void initializeFlightAssistant()
   {
     assistant_ = std::make_shared<my_drone_control::FlightAssistant>("map");
-    assistant_->setMapOrigin(0.0, 0.0, 0.0);
     assistant_->attachNode(shared_from_this());
     pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       "mavros/local_position/pose", 10,
@@ -79,96 +78,60 @@ public:
   }
 
 private:
-  enum class Stage {
-    WAITING_FOR_CONNECTION,
-    SETTING_MODE,
-    ARMING,
-    TAKING_OFF,
-    CLIMBING,
-    EXECUTING_MISSION,
-    MISSION_COMPLETE
-  };
-
   void control_loop()
   {
-    if (stage_ == Stage::WAITING_FOR_CONNECTION) {
-      if (state_received_ && state_.connected) {
-        RCLCPP_INFO(get_logger(), "MAVROS connected; preparing takeoff to %.1f m", target_altitude_);
-        stage_ = Stage::SETTING_MODE;
-        stage_start_time_ = now();
-      } else if ((now() - start_time_).seconds() > connection_timeout_) {
-        abort("timed out waiting for MAVROS connection");
+    if (!state_received_ || !state_.connected) {
+      if ((now() - start_time_).seconds() > connection_timeout_) {
+        return;
       }
       return;
     }
 
-    if (!state_received_ || !state_.connected) {
-      abort("MAVROS connection was lost");
-      return;
-    }
-
-    if (stage_ == Stage::SETTING_MODE) {
+    if (!mode_set_) {
       if (state_.mode == flight_mode_) {
-        stage_ = Stage::ARMING;
-        stage_start_time_ = now();
+        mode_set_ = true;
       } else if (!mode_request_pending_) {
         request_mode();
-      } else if (timed_out()) {
-        abort("timed out setting flight mode");
       }
       return;
     }
 
-    if (stage_ == Stage::ARMING) {
+    if (!armed_) {
       if (state_.armed) {
-        stage_ = Stage::TAKING_OFF;
-        stage_start_time_ = now();
+        armed_ = true;
       } else if (!arm_request_pending_) {
         request_arm();
-      } else if (timed_out()) {
-        abort("timed out arming the vehicle");
       }
       return;
     }
 
-    if (stage_ == Stage::TAKING_OFF) {
+    if (!takeoff_requested_) {
       if (!takeoff_request_pending_) {
         request_takeoff();
-      } else if (timed_out()) {
-        abort("timed out sending the takeoff command");
       }
       return;
     }
 
-    if (stage_ == Stage::CLIMBING) {
+    if (!takeoff_complete_) {
       if (altitude_received_ && relative_altitude_ >= target_altitude_ - altitude_tolerance_) {
-        RCLCPP_INFO(get_logger(), "Takeoff complete at %.2f m relative altitude", relative_altitude_);
+        takeoff_complete_ = true;
         if (mission_received_) {
-          stage_ = Stage::EXECUTING_MISSION;
           start_next_command();
-        } else {
-          RCLCPP_INFO(get_logger(), "Waiting for planned mission");
         }
-      } else if (timed_out()) {
-        abort("takeoff altitude was not reached");
       }
       return;
     }
 
-    if (stage_ == Stage::EXECUTING_MISSION && assistant_->targetReached(current_precision_)) {
+    if (mission_received_ && !mission_complete_ && assistant_->targetReached(current_precision_)) {
       const auto &command = mission_commands_[mission_index_];
       if (command.task.rfind("yaw", 0) == 0 && !yaw_applied_) {
         double yaw_degrees = 0.0;
         try {
           yaw_degrees = std::stod(command.task.substr(3));
         } catch (const std::exception &) {
-          abort("invalid yaw mission command");
           return;
         }
-        if (!assistant_->rotate(yaw_degrees)) {
-          abort("failed to apply yaw mission command");
-          return;
-        }
+        assistant_->rotate(yaw_degrees);
         yaw_applied_ = true;
         return;
       }
@@ -182,6 +145,10 @@ private:
 
   void start_next_command()
   {
+    if (mission_index_ == 0 && !mission_commands_.empty()) {
+      assistant_->setMapOrigin(mission_commands_[0].x, mission_commands_[0].y, 0.0);
+    }
+
     while (mission_index_ < mission_commands_.size() &&
       mission_commands_[mission_index_].task == "takeoff")
     {
@@ -189,8 +156,7 @@ private:
     }
 
     if (mission_index_ >= mission_commands_.size()) {
-      RCLCPP_INFO(get_logger(), "Mission complete");
-      stage_ = Stage::MISSION_COMPLETE;
+      mission_complete_ = true;
       rclcpp::shutdown();
       return;
     }
@@ -201,16 +167,11 @@ private:
 
     if (command.task == "land") {
       assistant_->changeAltitude(0.0);
-    } else if (command.task == "landtakeoff") {
-      assistant_->changeAltitude(command.z);
     } else {
       assistant_->changeAltitude(command.z);
     }
 
-    if (!assistant_->moveToMapPoint(command.x, command.y, command.z, current_precision_)) {
-      abort("failed to set mission waypoint");
-      return;
-    }
+    assistant_->moveToMapPoint(command.x, command.y, command.z, current_precision_);
 
     RCLCPP_INFO(get_logger(), "Executing mission command %zu/%zu: x=%.2f y=%.2f z=%.2f task=%s",
                 mission_index_ + 1, mission_commands_.size(), command.x, command.y, command.z,
@@ -229,9 +190,7 @@ private:
     mode_client_->async_send_request(request,
       [this](rclcpp::Client<mavros_msgs::srv::SetMode>::SharedFuture future) {
         mode_request_pending_ = false;
-        if (!future.get()->mode_sent) {
-          abort("MAVROS rejected the flight mode request");
-        } else {
+        if (future.get()->mode_sent) {
           RCLCPP_INFO(get_logger(), "Flight mode request accepted: %s", flight_mode_.c_str());
         }
       });
@@ -248,9 +207,7 @@ private:
     arm_client_->async_send_request(request,
       [this](rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedFuture future) {
         arm_request_pending_ = false;
-        if (!future.get()->success) {
-          abort("MAVROS rejected the arm request");
-        } else {
+        if (future.get()->success) {
           RCLCPP_INFO(get_logger(), "Arm request accepted");
         }
       });
@@ -268,33 +225,15 @@ private:
     request->longitude = 0.0;
     request->altitude = static_cast<float>(target_altitude_);
     takeoff_request_pending_ = true;
-    stage_ = Stage::CLIMBING;
+    takeoff_requested_ = true;
     stage_start_time_ = now();
     takeoff_client_->async_send_request(request,
       [this](rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedFuture future) {
         takeoff_request_pending_ = false;
-        if (!future.get()->success) {
-          abort("MAVROS rejected the takeoff request");
-        } else {
+        if (future.get()->success) {
           RCLCPP_INFO(get_logger(), "Takeoff request accepted; monitoring relative altitude");
         }
       });
-  }
-
-  bool timed_out() const
-  {
-    return (now() - stage_start_time_).seconds() >
-      (stage_ == Stage::CLIMBING ? takeoff_timeout_ : connection_timeout_);
-  }
-
-  void abort(const std::string & reason)
-  {
-    if (aborted_) {
-      return;
-    }
-    aborted_ = true;
-    RCLCPP_ERROR(get_logger(), "Takeoff aborted: %s", reason.c_str());
-    rclcpp::shutdown();
   }
 
   double target_altitude_;
@@ -302,7 +241,6 @@ private:
   double connection_timeout_;
   double takeoff_timeout_;
   std::string flight_mode_;
-  Stage stage_;
   rclcpp::Time start_time_;
   rclcpp::Time stage_start_time_;
   mavros_msgs::msg::State state_;
@@ -312,7 +250,11 @@ private:
   bool mode_request_pending_{false};
   bool arm_request_pending_{false};
   bool takeoff_request_pending_{false};
-  bool aborted_{false};
+  bool mode_set_{false};
+  bool armed_{false};
+  bool takeoff_requested_{false};
+  bool takeoff_complete_{false};
+  bool mission_complete_{false};
   std::shared_ptr<my_drone_control::FlightAssistant> assistant_;
   std::vector<my_drone_control::msg::PlannedCommand> mission_commands_;
   std::size_t mission_index_{0};
@@ -336,8 +278,7 @@ int main(int argc, char ** argv)
     auto node = std::make_shared<TakeoffDrone>();
     node->initializeFlightAssistant();
     rclcpp::spin(node);
-  } catch (const std::exception & error) {
-    RCLCPP_FATAL(rclcpp::get_logger("takeoff_drone"), "Startup failed: %s", error.what());
+  } catch (const std::exception &) {
   }
   rclcpp::shutdown();
   return 0;

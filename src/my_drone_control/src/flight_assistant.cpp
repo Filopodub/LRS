@@ -75,6 +75,12 @@ void FlightAssistant::updateLocalPose(const geometry_msgs::msg::PoseStamped &pos
   local_x_ = pose.pose.position.x;
   local_y_ = pose.pose.position.y;
   local_z_ = pose.pose.position.z;
+  if (!map_origin_set_) {
+    map_origin_x_ = local_x_;
+    map_origin_y_ = local_y_;
+    map_origin_z_ = local_z_;
+    map_origin_set_ = true;
+  }
   const auto &q = pose.pose.orientation;
   local_yaw_deg_ = std::atan2(
     2.0 * (q.w * q.z + q.x * q.y),
@@ -191,10 +197,15 @@ void FlightAssistant::setMapOrigin(double x, double y, double z)
   map_origin_x_ = x;
   map_origin_y_ = y;
   map_origin_z_ = z;
+  map_origin_set_ = true;
 }
 
 bool FlightAssistant::execute(const PlannedCommand &command)
 {
+  if (!map_origin_set_) {
+    setMapOrigin(command.x, command.y, 0.0);
+  }
+
   if (command.task == "takeoff") {
     return takeoff(command.z);
   }

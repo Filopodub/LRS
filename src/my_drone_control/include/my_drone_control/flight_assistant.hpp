@@ -58,6 +58,7 @@ private:
   double map_origin_x_ = 0.0;
   double map_origin_y_ = 0.0;
   double map_origin_z_ = 0.0;
+  bool map_origin_set_ = false;
 };
 
 }  // namespace my_drone_control
