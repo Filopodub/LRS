@@ -2,8 +2,20 @@
 
 A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle inflation, spatial occupancy querying, mission CSV waypoint parsing, 3D A* path planning, and line-of-sight path post-processing for autonomous drone navigation in hangar environments.
 
+## Contents
+
+- [A1.1 — Map processing and path planning](#a1-1-map-processing)
+- [A1.2 — Mission execution, indoor flight](#a1-2-mission-execution)
+- [Prerequisites and build](#prerequisites-and-build)
+- [How to run](#how-to-run)
+- [ROS 2 interface](#ros-2-interface)
+- [Mission pipeline](#mission-pipeline)
+- [Implementation overview](#implementation-overview)
+- [Launch file](#launch-file)
+
 ---
 
+<a id="a1-1-map-processing"></a>
 ## A1.1 — Map processing and path planning
 
 ### 1. Map loading (1.5 pts)
@@ -105,16 +117,18 @@ This produces a spherical 3D inflation around each occupied voxel.
 obstacles are expanded in X, Y and Z according to the configured
 0.60 m safety radius.*
 
-
 #### Steel Racks / Shelving Handling
 
-Steel shelving and other obstacles represented by the point cloud are converted into occupied voxels and then expanded using the 3D spherical inflation process.
+Steel shelving and other obstacles represented by the point cloud are converted
+into occupied voxels and then expanded using the 3D spherical inflation process.
 
-The inflation can fill small gaps between nearby occupied voxels, producing a more conservative obstacle representation. The A* planner then treats the resulting inflated voxels as occupied.
+The inflation can fill small gaps between nearby occupied voxels, producing a
+more conservative obstacle representation. The A* planner then treats the
+resulting inflated voxels as occupied.
 
 ---
 
-### 3. Advanced planning algorithm  — A* (2.0 pts)
+### 3. Advanced planning algorithm — A* (2.0 pts)
 
 * **Algorithm**: 3D A* grid search using a **26-connected neighborhood**. Each voxel can have up to 26 neighboring voxels.
 
@@ -216,7 +230,7 @@ The parser:
 * stores `precision` and `task` as strings,
 * ignores malformed numeric rows.
 
-Currently, only the waypoint coordinates (`x`, `y`, `z`) are used by the path planner. The `precision` and `task` values are parsed and stored but do not currently affect the A* search or the published path.
+Waypoint coordinates (`x`, `y`, `z`) determine the A* search. The `precision` and `task` fields do not affect route search; the planner preserves them on the corresponding mission waypoint when it publishes the executable mission.
 
 ---
 
@@ -253,8 +267,48 @@ displayed path is the result of 3D A* planning followed by line-of-sight
 shortcutting, and is shown together with the inflated voxel map and
 mission waypoints.*
 
+[Back to Contents](#contents)
+
+<a id="a1-2-mission-execution"></a>
+## A1.2 — Mission execution, indoor flight
+
+This section describes the assignment to execute the A1.1 route in the hangar
+world. The mission CSV contains **goal waypoints**, not the complete flight
+path: the planner finds a collision-free route between consecutive rows, and
+the controller performs each task at the original waypoint.
+
+Mission files use the format `x,y,z,precision,task`. The assignment requires
+loading a selected file at runtime, performing the MAVROS connection, `GUIDED`
+mode, and arm handshake with response checks, then taking off, navigating,
+performing each task in order, and landing/disarming. State transitions should
+be logged so failures identify the stage where execution stopped.
+
+The assignment distinguishes transit points from mission waypoints. Simplified
+path points between CSV rows are pass-through targets; they must not make the
+drone stop at every point. A `soft` waypoint allows transit within a looser
+position tolerance, while a `hard` waypoint requires the drone to settle before
+continuing. The selected tolerances and stability rule should be justified and
+verified during flight.
+
+Tasks include `takeoff`, `land`, `landtakeoff` (land, then re-arm and re-enter
+`GUIDED` before continuing), and `yaw<degrees>`. Document the yaw frame and
+direction convention, hold the requested heading at a yaw waypoint, and face
+the direction of travel between waypoints. Validate the complete mission in
+simulation before using hardware.
+
+### A1.2 acceptance checklist
+
+- The mission runs end-to-end from a runtime-selected mission file and lands safely.
+- Tasks execute at the original mission waypoints, not at every planner point.
+- `hard` and `soft` behavior is visibly different; hard arrival includes settling.
+- The vehicle faces along each segment and holds commanded yaw tasks.
+- The route avoids inflated obstacles, including the shelving racks.
+
+[Back to Contents](#contents)
+
 ---
 
+<a id="prerequisites-and-build"></a>
 ## 2. Prerequisites & Build Instructions
 
 Ensure that ROS 2, PCL, and the package dependencies are installed.
@@ -269,63 +323,110 @@ colcon build --packages-select my_drone_control
 source install/setup.bash
 ```
 
+[Back to Contents](#contents)
+
 ---
 
+<a id="how-to-run"></a>
 ## 3. How to Run
 
-### Step 1: Launch the Planner and RViz
+### One-command startup
 
-The launch file starts both the `map_planner_node` and RViz2 with the predefined RViz configuration:
+Build and source the workspace, then run the unified launch file:
 
 ```bash
+cd ~/ros2_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select my_drone_control
+source install/setup.bash
 ros2 launch my_drone_control planner.launch.py
 ```
 
-The launch file starts:
-
-* `map_planner_node`
-* RViz2
-* `config/planner_view.rviz`
-
-No additional `ros2 run my_drone_control map_planner_node` command is required when using the launch file.
-
-### Step 2: Run with a Custom Mission CSV
-
-The planner can also be started directly with a different mission file:
+The launch prompts `Open RViz? [y/N]`, then starts `map_planner_node`, optional
+RViz, Gazebo, ArduPilot SITL, MAVROS, and finally `takeoff_drone`. It uses the
+bundled `maps/map.pcd` and `missions/exam_example.csv`. Set `LRS_REPO_DIR` if
+the simulator repository is not at `~/LRS-URK`:
 
 ```bash
-ros2 run my_drone_control map_planner_node \
-  --ros-args \
-  -p mission_path:=/path/to/custom_mission.csv
+LRS_REPO_DIR=/path/to/LRS-URK ros2 launch my_drone_control planner.launch.py
 ```
 
-The same approach can be used to override other ROS parameters:
+Press **Ctrl+C** in the launch terminal to stop the managed processes. This
+launch starts the flight controller, which can arm and execute the mission
+once MAVROS connects. Use the SITL simulation and verify the selected mission
+before running it.
+
+### Manual startup
+
+Use separate terminals to inspect or control processes individually. In each
+ROS terminal, first source ROS and the workspace:
 
 ```bash
-ros2 run my_drone_control map_planner_node \
-  --ros-args \
-  -p map_path:=/path/to/map.pcd \
-  -p mission_path:=/path/to/mission.csv \
-  -p voxel_size:=0.25 \
-  -p safety_radius:=0.60
+source /opt/ros/jazzy/setup.bash
+source ~/ros2_ws/install/setup.bash
 ```
+
+Start the following processes in order:
+
+1. **Gazebo**, from the LRS-URK repository:
+  ```bash
+  cd ~/LRS-URK
+  ./scripts/run_gazebo.sh
+  ```
+2. **ArduPilot SITL**, in another terminal:
+  ```bash
+  cd ~/LRS-URK
+  ./scripts/run_sitl.sh
+  ```
+3. **MAVROS**, in another sourced terminal:
+  ```bash
+  cd ~/LRS-URK
+  ./scripts/run_mavros.sh
+  ```
+4. **Map planner**, in a sourced ROS terminal:
+  ```bash
+  ros2 run my_drone_control map_planner_node
+  ```
+5. **Takeoff and mission controller**, in another sourced ROS terminal:
+  ```bash
+  ros2 run my_drone_control takeoff_drone
+  ```
+6. **RViz, optionally**, in another sourced ROS terminal:
+  ```bash
+  rviz2 -d $(ros2 pkg prefix my_drone_control)/share/my_drone_control/config/planner_view.rviz
+  ```
+
+Stop each manual process with Ctrl+C in its terminal. To use another mission
+CSV, pass it to the planner:
+
+```bash
+ros2 run my_drone_control map_planner_node --ros-args -p mission_path:=/path/to/mission.csv
+```
+
+The planner also accepts `map_path`, `voxel_size`, and `safety_radius` overrides.
+
+[Back to Contents](#contents)
 
 ---
 
+<a id="ros-2-interface"></a>
 ## 4. ROS 2 Interface
 
 ### Published Topics
 
 All publishers use a QoS profile with depth `1` and `transient_local` durability.
 
-| Topic               | Type                          | Description                                                    |
-| ------------------- | ----------------------------- | -------------------------------------------------------------- |
-| `/map_raw`          | `sensor_msgs/msg/PointCloud2` | Original PCD point cloud.                                      |
-| `/voxel_grid`       | `sensor_msgs/msg/PointCloud2` | Downsampled point cloud produced by the PCL VoxelGrid filter.  |
-| `/voxel_inflated`   | `sensor_msgs/msg/PointCloud2` | Inflated 3D occupancy representation.                          |
-| `/planned_commands` | `nav_msgs/msg/Path`           | Final simplified 3D path generated from the mission waypoints. |
+| Topic | Type | Description |
+| --- | --- | --- |
+| `/map_raw` | `sensor_msgs/msg/PointCloud2` | Original PCD point cloud. |
+| `/voxel_grid` | `sensor_msgs/msg/PointCloud2` | Downsampled point cloud produced by the PCL VoxelGrid filter. |
+| `/voxel_inflated` | `sensor_msgs/msg/PointCloud2` | Inflated 3D occupancy representation. |
+| `/planned_path` | `nav_msgs/msg/Path` | Simplified route for RViz visualization. |
+| `/planned_commands` | `my_drone_control/msg/PlannedMission` | Executable route with mission precision and task metadata for `takeoff_drone`. |
 
-All published map and path messages use the `map` frame.
+All map and route positions use the `map` frame. The mission topic uses
+transient-local durability so the takeoff node can receive a mission published
+before it starts.
 
 ### Parameters
 
@@ -338,106 +439,50 @@ All published map and path messages use the `map` frame.
 
 > **Note:** The default paths are absolute paths from the development workspace and may need to be changed when the package is used in another workspace or on another computer.
 
+[Back to Contents](#contents)
+
 ---
 
+<a id="mission-pipeline"></a>
 ## 5. Mission Pipeline
 
 ```text
-                    PCD Map File
-                         |
-                         v
-               Load Point Cloud (PCL)
-                         |
-                         v
-              Voxel Grid (0.25 m)
-                         |
-                         v
-             Occupied Voxel Set
-                         |
-                         v
-              3D Obstacle Inflation
-                  (0.60 m radius)
-                         |
-                         v
-              Inflated Occupancy Map
-                         |
-              Mission CSV / Waypoints
-                         |
-                         v
-               Sequential 3D A*
-                         |
-                         v
-             Line-of-Sight Shortcutting
-                         |
-                         v
-              /planned_commands (Path)
-                         |
-                         v
-                  Drone Controller
+PCD map -> voxel grid -> inflated occupancy map
+          |
+Mission CSV -> sequential A* -> simplified route
+          |
+         +------------+-------------+
+         |                          |
+         v                          v
+   /planned_path (Path)       /planned_commands
+     RViz                 (PlannedMission)
+                |
+                v
+            takeoff_drone
 ```
+
+[Back to Contents](#contents)
 
 ---
 
+<a id="implementation-overview"></a>
 ## 6. Implementation Overview
 
-The main processing stages implemented by `MapPlannerNode` are:
+The planner loads the PCD and mission CSV, builds an inflated voxel map, runs
+3D A* between consecutive mission waypoints, and simplifies each route segment.
+It publishes the route for visualization on `/planned_path` and the executable
+mission, including waypoint task metadata, on `/planned_commands`.
 
-1. Read ROS 2 parameters.
-2. Load the PCD point cloud.
-3. Calculate the map coordinate bounds.
-4. Downsample the point cloud using `pcl::VoxelGrid`.
-5. Convert downsampled points into occupied voxel indices.
-6. Inflate occupied voxels using the configured safety radius.
-7. Publish the raw, voxelized, and inflated point clouds.
-8. Load mission waypoints from CSV.
-9. Convert consecutive waypoint coordinates into voxel indices.
-10. Run 3D A* between each pair of waypoints.
-11. Simplify every A* segment using sampled 3D line-of-sight checking.
-12. Combine all simplified segments into one mission path.
-13. Publish the resulting path as `/planned_commands`.
+[Back to Contents](#contents)
 
 ---
 
+<a id="launch-file"></a>
 ## 7. Launch File
 
-The package launch file starts both the planner node and RViz2:
+`launch/planner.launch.py` is the interactive full-stack launch described in
+[How to Run](#how-to-run). It asks whether to start RViz, launches the planner,
+then starts the simulator and mission controller. Use the manual startup
+instructions when you want each process in its own terminal.
 
-```python
-import os
-
-from ament_index_python.packages import get_package_share_directory
-from launch import LaunchDescription
-from launch_ros.actions import Node
-
-
-def generate_launch_description():
-    pkg_dir = get_package_share_directory('my_drone_control')
-    rviz_config_file = os.path.join(
-        pkg_dir,
-        'config',
-        'planner_view.rviz'
-    )
-
-    return LaunchDescription([
-        Node(
-            package='my_drone_control',
-            executable='map_planner_node',
-            name='map_planner_node',
-            output='screen'
-        ),
-
-        Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2',
-            arguments=['-d', rviz_config_file],
-            output='screen'
-        )
-    ])
-```
-
-The complete planning and visualization environment can therefore be started with:
-
-```bash
-ros2 launch my_drone_control planner.launch.py
-```
+[Back to Contents](#contents)
