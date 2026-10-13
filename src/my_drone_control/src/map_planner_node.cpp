@@ -3,6 +3,8 @@
 #include <nav_msgs/msg/path.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
+#include "my_drone_control/msg/planned_command.hpp"
+#include "my_drone_control/msg/planned_mission.hpp"
 
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
@@ -65,7 +67,9 @@ public:
     inflated_pub_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("voxel_inflated", qos_profile);
     
     // Path & Mission Marker publishers
-    planned_commands_pub_ = this->create_publisher<nav_msgs::msg::Path>("planned_commands", qos_profile);
+    planned_path_pub_ = this->create_publisher<nav_msgs::msg::Path>("planned_path", qos_profile);
+    planned_commands_pub_ = this->create_publisher<my_drone_control::msg::PlannedMission>(
+      "planned_commands", qos_profile);
     mission_markers_pub_ = this->create_publisher<visualization_msgs::msg::MarkerArray>("mission_markers", qos_profile);
 
     process_and_plan();
@@ -247,6 +251,7 @@ private:
 
     // 3. Plan A* between sequential mission waypoints
     std::vector<Index3D> full_path;
+    std::vector<Waypoint> path_waypoints;
     auto t_start = std::chrono::high_resolution_clock::now();
 
     size_t total_raw_points = 0;
@@ -269,9 +274,19 @@ private:
       total_simplified_points += simplified_segment.size();
       if (full_path.empty()) {
         full_path.insert(full_path.end(), simplified_segment.begin(), simplified_segment.end());
+        path_waypoints.resize(simplified_segment.size(),
+                              Waypoint{0.0, 0.0, 0.0, mission[i].precision, "-"});
+        path_waypoints.front() = mission[i];
       } else {
-        full_path.insert(full_path.end(), simplified_segment.begin() + 1, simplified_segment.end());
+        for (auto point = simplified_segment.begin() + 1;
+          point != simplified_segment.end(); ++point)
+        {
+          full_path.push_back(*point);
+          path_waypoints.push_back(
+            Waypoint{0.0, 0.0, 0.0, mission[i + 1].precision, "-"});
+        }
       }
+      path_waypoints.back() = mission[i + 1];
     }
 
     auto t_end = std::chrono::high_resolution_clock::now();
@@ -295,8 +310,9 @@ private:
       reduction_percent
     );
 
-    // 4. Publish to planned_commands topic
-    publish_path(planned_commands_pub_, full_path);
+    // Keep the visualization route and executable mission on separate topics.
+    publish_path(planned_path_pub_, full_path);
+    publish_mission(full_path, path_waypoints);
   }
 
   std::vector<Index3D> plan3DAStar(const Index3D& start, const Index3D& goal) {
@@ -414,6 +430,22 @@ private:
     pub->publish(msg);
   }
 
+  void publish_mission(
+    const std::vector<Index3D>& path, const std::vector<Waypoint>& path_waypoints)
+  {
+    my_drone_control::msg::PlannedMission mission;
+    for (size_t i = 0; i < path.size(); ++i) {
+      my_drone_control::msg::PlannedCommand command;
+      indexToPoint(path[i], command.x, command.y, command.z);
+      command.precision = path_waypoints[i].precision;
+      command.task = path_waypoints[i].task;
+      mission.commands.push_back(command);
+    }
+    planned_commands_pub_->publish(mission);
+    RCLCPP_INFO(this->get_logger(), "Published executable mission with %zu commands",
+                mission.commands.size());
+  }
+
   double voxel_size_;
   double min_x_, max_x_, min_y_, max_y_, min_z_, max_z_;
   std::unordered_set<Index3D, Index3DHash> occupied_grid_;
@@ -422,7 +454,8 @@ private:
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr map_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr voxel_pub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr inflated_pub_;
-  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr planned_commands_pub_;
+  rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr planned_path_pub_;
+  rclcpp::Publisher<my_drone_control::msg::PlannedMission>::SharedPtr planned_commands_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr mission_markers_pub_;
 };
 

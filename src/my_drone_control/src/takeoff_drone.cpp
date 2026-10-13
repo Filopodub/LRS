@@ -53,7 +53,7 @@ public:
     arm_client_ = create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
     takeoff_client_ = create_client<mavros_msgs::srv::CommandTOL>("mavros/cmd/takeoff");
     mission_sub_ = create_subscription<my_drone_control::msg::PlannedMission>(
-      "planned_commands", 10,
+      "planned_commands", rclcpp::QoS(1).transient_local(),
       [this](const my_drone_control::msg::PlannedMission::SharedPtr message) {
         if (mission_received_) {
           RCLCPP_WARN(get_logger(), "Ignoring duplicate mission");

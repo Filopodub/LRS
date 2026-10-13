@@ -17,12 +17,17 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# 1. Find ROS 2 Dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(pcl_conversions REQUIRED)
 find_package(mavros_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
+find_package(PCL REQUIRED COMPONENTS common io filters)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/PlannedCommand.msg"
@@ -47,45 +52,6 @@ set_target_properties(flight_assistant_lib PROPERTIES
 )
 
 # -----------------------------------------------------------------------------
-# Node: flight_assistant_node
-# -----------------------------------------------------------------------------
-add_executable(flight_assistant_node src/flight_assistant_node.cpp)
-target_link_libraries(flight_assistant_node
-  flight_assistant_lib
-)
-set_target_properties(flight_assistant_node PROPERTIES
-  INSTALL_RPATH "$ORIGIN"
-  BUILD_RPATH "$ORIGIN"
-)
-
-# -----------------------------------------------------------------------------
-# Node: navigation_node
-# -----------------------------------------------------------------------------
-add_executable(navigation_node src/navigation.cpp)
-target_link_libraries(navigation_node
-  flight_assistant_lib
-)
-ament_target_dependencies(navigation_node
-  rclcpp
-  std_msgs
-)
-rosidl_get_typesupport_target(cpp_typesupport_target
-  ${PROJECT_NAME} "rosidl_typesupport_cpp")
-target_link_libraries(navigation_node
-  "${cpp_typesupport_target}"
-find_package(pcl_conversions REQUIRED)
-find_package(visualization_msgs REQUIRED)
-
-# 2. Find System PCL Dependency
-find_package(PCL REQUIRED COMPONENTS common io filters)
-
-# Include PCL headers
-include_directories(
-  include
-  ${PCL_INCLUDE_DIRS}
-)
-
-# -----------------------------------------------------------------------------
 # Node: takeoff_drone
 # -----------------------------------------------------------------------------
 add_executable(takeoff_drone src/takeoff_drone.cpp)
@@ -95,6 +61,7 @@ target_link_libraries(takeoff_drone
 ament_target_dependencies(takeoff_drone
   rclcpp
   std_msgs
+  geometry_msgs
   mavros_msgs
 )
 rosidl_get_typesupport_target(takeoff_cpp_typesupport_target
@@ -106,14 +73,6 @@ set_target_properties(takeoff_drone PROPERTIES
   INSTALL_RPATH "$ORIGIN"
   BUILD_RPATH "$ORIGIN"
 )
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/takeoff_drone.cpp")
-  add_executable(takeoff_drone src/takeoff_drone.cpp)
-  ament_target_dependencies(takeoff_drone
-    rclcpp
-    mavros_msgs
-    std_msgs
-  )
-endif()
 
 # -----------------------------------------------------------------------------
 # Node: mission_demo_node
@@ -126,9 +85,9 @@ rosidl_get_typesupport_target(mission_demo_cpp_typesupport_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(mission_demo_node
   "${mission_demo_cpp_typesupport_target}"
-add_executable(map_planner_node src/map_planner_node.cpp)
+)
 
-# Pass ROS 2 header directories to target
+add_executable(map_planner_node src/map_planner_node.cpp)
 ament_target_dependencies(map_planner_node
   rclcpp
   sensor_msgs
@@ -137,38 +96,29 @@ ament_target_dependencies(map_planner_node
   pcl_conversions
   visualization_msgs
 )
-
-# Link system PCL libraries
 target_link_libraries(map_planner_node
   ${PCL_LIBRARIES}
 )
+target_include_directories(map_planner_node SYSTEM PRIVATE ${PCL_INCLUDE_DIRS})
+rosidl_get_typesupport_target(map_planner_cpp_typesupport_target
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(map_planner_node "${map_planner_cpp_typesupport_target}")
+add_dependencies(map_planner_node ${PROJECT_NAME}__rosidl_generator_cpp)
 
 # -----------------------------------------------------------------------------
 # Installation
 # -----------------------------------------------------------------------------
 install(TARGETS
   flight_assistant_lib
-  flight_assistant_node
-  navigation_node
   takeoff_drone
   mission_demo_node
+  map_planner_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY include/
   DESTINATION include
 )
-
-install(DIRECTORY launch config maps
-  map_planner_node
-  DESTINATION lib/${PROJECT_NAME}
-)
-
-if(TARGET takeoff_drone)
-  install(TARGETS takeoff_drone
-    DESTINATION lib/${PROJECT_NAME}
-  )
-endif()
 
 install(DIRECTORY launch config maps missions
   DESTINATION share/${PROJECT_NAME}

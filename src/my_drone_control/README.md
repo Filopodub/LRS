@@ -19,14 +19,25 @@ cd ~/ros2_ws
 source /opt/ros/jazzy/setup.bash
 colcon build --packages-select my_drone_control
 source install/setup.bash
+ros2 run my_drone_control map_planner_node
+```
+
+In a second sourced terminal, start the takeoff node. It subscribes to the
+planner's transient-local `planned_commands` mission, so it can start after the
+planner has published it:
+
+```bash
 ros2 run my_drone_control takeoff_drone
 ```
+
+`mission_demo_node` is an alternative mission source for testing. Do not run it
+at the same time as `map_planner_node`, since both publish to `planned_commands`.
 
 ```bash
 ros2 run my_drone_control takeoff_drone --ros-args -p report_only:=true
 ```
 
-The default target is 5 m, matching the LRS-URK outdoor assignment. Override it
+The default target is 2 m. Override it
 without recompiling:
 
 ```bash

@@ -16,7 +16,8 @@ public:
   MissionDemoNode()
   : Node("mission_demo_node")
   {
-    publisher_ = this->create_publisher<my_drone_control::msg::PlannedMission>("planned_commands", 10);
+    publisher_ = this->create_publisher<my_drone_control::msg::PlannedMission>(
+      "planned_commands", rclcpp::QoS(1).transient_local());
 
     auto mission = my_drone_control::msg::PlannedMission();
     const std::vector<std::tuple<double, double, double, std::string, std::string>> steps = {
