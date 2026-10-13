@@ -75,12 +75,6 @@ void FlightAssistant::updateLocalPose(const geometry_msgs::msg::PoseStamped &pos
   local_x_ = pose.pose.position.x;
   local_y_ = pose.pose.position.y;
   local_z_ = pose.pose.position.z;
-  if (!map_origin_set_) {
-    map_origin_x_ = local_x_;
-    map_origin_y_ = local_y_;
-    map_origin_z_ = local_z_;
-    map_origin_set_ = true;
-  }
   const auto &q = pose.pose.orientation;
   local_yaw_deg_ = std::atan2(
     2.0 * (q.w * q.z + q.x * q.y),
@@ -139,12 +133,12 @@ bool FlightAssistant::moveTo(double x, double y, double z, const std::string &pr
 
 bool FlightAssistant::moveToMapPoint(double map_x, double map_y, double map_z, const std::string &precision)
 {
-  const double local_x = map_x - map_origin_x_;
-  const double local_y = map_y - map_origin_y_;
-  const double local_z = map_z - map_origin_z_;
+  const double local_x = -map_y;
+  const double local_y = map_x;
+  const double local_z = map_z;
 
-  std::cout << "[FlightAssistant] map->local: (" << map_x << ", " << map_y << ", " << map_z << ") -> ("
-            << local_x << ", " << local_y << ", " << local_z << ")" << std::endl;
+  std::cout << "[FlightAssistant] map->local: (" << map_x << ", " << map_y << ", " << map_z
+            << ") -> (" << local_x << ", " << local_y << ", " << local_z << ")" << std::endl;
   return moveTo(local_x, local_y, local_z, precision);
 }
 
@@ -192,20 +186,8 @@ bool FlightAssistant::endMission()
   return true;
 }
 
-void FlightAssistant::setMapOrigin(double x, double y, double z)
-{
-  map_origin_x_ = x;
-  map_origin_y_ = y;
-  map_origin_z_ = z;
-  map_origin_set_ = true;
-}
-
 bool FlightAssistant::execute(const PlannedCommand &command)
 {
-  if (!map_origin_set_) {
-    setMapOrigin(command.x, command.y, 0.0);
-  }
-
   if (command.task == "takeoff") {
     return takeoff(command.z);
   }

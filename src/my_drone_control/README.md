@@ -1,6 +1,10 @@
 # my_drone_control
 
-`takeoff_drone` performs a guarded ArduPilot/MAVROS takeoff:
+By default, `takeoff_drone` reports the first pose received from
+`/mavros/local_position/pose` as converted `x`, `y`, and `z` coordinates in
+meters, then waits for a mission on `planned_commands` and executes it. To
+report the position without flight actions, explicitly set `report_only` to
+`true`:
 
 1. Wait for `/mavros/state.connected`.
 2. Request `GUIDED` mode and verify the response.
@@ -16,6 +20,10 @@ source /opt/ros/jazzy/setup.bash
 colcon build --packages-select my_drone_control
 source install/setup.bash
 ros2 run my_drone_control takeoff_drone
+```
+
+```bash
+ros2 run my_drone_control takeoff_drone --ros-args -p report_only:=true
 ```
 
 The default target is 5 m, matching the LRS-URK outdoor assignment. Override it

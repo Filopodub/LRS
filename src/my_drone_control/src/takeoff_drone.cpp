@@ -23,6 +23,7 @@ public:
   TakeoffDrone()
   : Node("takeoff_drone")
   {
+    report_only_ = declare_parameter<bool>("report_only", false);
     target_altitude_ = declare_parameter<double>("target_altitude", 2.0);
     flight_mode_ = declare_parameter<std::string>("flight_mode", "GUIDED");
     altitude_tolerance_ = declare_parameter<double>("altitude_tolerance", 0.3);
@@ -71,15 +72,27 @@ public:
     assistant_ = std::make_shared<my_drone_control::FlightAssistant>("map");
     assistant_->attachNode(shared_from_this());
     pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-      "mavros/local_position/pose", 10,
+      "mavros/local_position/pose", rclcpp::SensorDataQoS(),
       [this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
         assistant_->updateLocalPose(*message);
+        if (!location_reported_) {
+          const auto &position = message->pose.position;
+          const double map_x = position.y;
+          const double map_y = -position.x;
+          RCLCPP_INFO(get_logger(), "Converted start position (m): x=%.3f y=%.3f z=%.3f",
+                      map_x, map_y, position.z);
+          location_reported_ = true;
+        }
       });
   }
 
 private:
   void control_loop()
   {
+    if (report_only_) {
+      return;
+    }
+
     if (!state_received_ || !state_.connected) {
       if ((now() - start_time_).seconds() > connection_timeout_) {
         return;
@@ -106,6 +119,9 @@ private:
     }
 
     if (!takeoff_requested_) {
+      if (!mission_received_) {
+        return;
+      }
       if (!takeoff_request_pending_) {
         request_takeoff();
       }
@@ -113,7 +129,7 @@ private:
     }
 
     if (!takeoff_complete_) {
-      if (altitude_received_ && relative_altitude_ >= target_altitude_ - altitude_tolerance_) {
+      if (altitude_received_ && relative_altitude_ >= active_takeoff_altitude_ - altitude_tolerance_) {
         takeoff_complete_ = true;
         if (mission_received_) {
           start_next_command();
@@ -122,7 +138,38 @@ private:
       return;
     }
 
-    if (mission_received_ && !mission_complete_ && assistant_->targetReached(current_precision_)) {
+    if (!mission_received_ || mission_complete_) {
+      return;
+    }
+
+    if (landtakeoff_phase_ == LandTakeoffPhase::Descending) {
+      if (altitude_received_ && relative_altitude_ <= altitude_tolerance_) {
+        assistant_->changeAltitude(mission_commands_[mission_index_].z);
+        landtakeoff_phase_ = LandTakeoffPhase::Climbing;
+      }
+      return;
+    }
+
+    if (landtakeoff_phase_ == LandTakeoffPhase::Landing) {
+      if (altitude_received_ && relative_altitude_ <= altitude_tolerance_) {
+        landtakeoff_phase_ = LandTakeoffPhase::None;
+        mission_complete_ = true;
+        rclcpp::shutdown();
+      }
+      return;
+    }
+
+    if (landtakeoff_phase_ == LandTakeoffPhase::Climbing) {
+      const auto &command = mission_commands_[mission_index_];
+      if (altitude_received_ && relative_altitude_ >= command.z - altitude_tolerance_) {
+        landtakeoff_phase_ = LandTakeoffPhase::None;
+        ++mission_index_;
+        start_next_command();
+      }
+      return;
+    }
+
+    if (assistant_->targetReached(current_precision_)) {
       const auto &command = mission_commands_[mission_index_];
       if (command.task.rfind("yaw", 0) == 0 && !yaw_applied_) {
         double yaw_degrees = 0.0;
@@ -136,6 +183,21 @@ private:
         return;
       }
 
+      if (command.task == "landtakeoff") {
+        assistant_->changeAltitude(0.0);
+        landtakeoff_phase_ = LandTakeoffPhase::Descending;
+        RCLCPP_INFO(get_logger(), "Landing before takeoff at mission command %zu",
+                    mission_index_ + 1);
+        return;
+      }
+
+      if (command.task == "land") {
+        assistant_->changeAltitude(0.0);
+        landtakeoff_phase_ = LandTakeoffPhase::Landing;
+        RCLCPP_INFO(get_logger(), "Landing at final mission waypoint");
+        return;
+      }
+
       RCLCPP_INFO(get_logger(), "Mission command %zu/%zu reached: %s",
                   mission_index_ + 1, mission_commands_.size(), command.task.c_str());
       ++mission_index_;
@@ -145,16 +207,6 @@ private:
 
   void start_next_command()
   {
-    if (mission_index_ == 0 && !mission_commands_.empty()) {
-      assistant_->setMapOrigin(mission_commands_[0].x, mission_commands_[0].y, 0.0);
-    }
-
-    while (mission_index_ < mission_commands_.size() &&
-      mission_commands_[mission_index_].task == "takeoff")
-    {
-      ++mission_index_;
-    }
-
     if (mission_index_ >= mission_commands_.size()) {
       mission_complete_ = true;
       rclcpp::shutdown();
@@ -165,11 +217,7 @@ private:
     current_precision_ = command.precision == "hard" ? "hard" : "soft";
     yaw_applied_ = false;
 
-    if (command.task == "land") {
-      assistant_->changeAltitude(0.0);
-    } else {
-      assistant_->changeAltitude(command.z);
-    }
+    assistant_->changeAltitude(command.z);
 
     assistant_->moveToMapPoint(command.x, command.y, command.z, current_precision_);
 
@@ -223,7 +271,16 @@ private:
     request->yaw = 0.0F;
     request->latitude = 0.0;
     request->longitude = 0.0;
-    request->altitude = static_cast<float>(target_altitude_);
+    active_takeoff_altitude_ = target_altitude_;
+    if (mission_received_) {
+      for (const auto &command : mission_commands_) {
+        if (command.task == "takeoff" && command.z > 0.0) {
+          active_takeoff_altitude_ = command.z;
+          break;
+        }
+      }
+    }
+    request->altitude = static_cast<float>(active_takeoff_altitude_);
     takeoff_request_pending_ = true;
     takeoff_requested_ = true;
     stage_start_time_ = now();
@@ -236,7 +293,10 @@ private:
       });
   }
 
+  bool report_only_{true};
+  bool location_reported_{false};
   double target_altitude_;
+  double active_takeoff_altitude_{0.0};
   double altitude_tolerance_;
   double connection_timeout_;
   double takeoff_timeout_;
@@ -255,6 +315,8 @@ private:
   bool takeoff_requested_{false};
   bool takeoff_complete_{false};
   bool mission_complete_{false};
+  enum class LandTakeoffPhase { None, Descending, Climbing, Landing };
+  LandTakeoffPhase landtakeoff_phase_{LandTakeoffPhase::None};
   std::shared_ptr<my_drone_control::FlightAssistant> assistant_;
   std::vector<my_drone_control::msg::PlannedCommand> mission_commands_;
   std::size_t mission_index_{0};

@@ -29,7 +29,6 @@ public:
   bool changeAltitude(double altitude_m, const std::string &precision = "soft");
   bool land();
   bool endMission();
-  void setMapOrigin(double x, double y, double z);
   void attachNode(const rclcpp::Node::SharedPtr &node);
   void updateLocalPose(const geometry_msgs::msg::PoseStamped &pose);
   bool targetReached(const std::string &precision = "soft") const;
@@ -55,10 +54,6 @@ private:
   rclcpp::TimerBase::SharedPtr setpoint_timer_;
   double target_z_ = 0.0;
   double target_yaw_deg_ = 0.0;
-  double map_origin_x_ = 0.0;
-  double map_origin_y_ = 0.0;
-  double map_origin_z_ = 0.0;
-  bool map_origin_set_ = false;
 };
 
 }  // namespace my_drone_control

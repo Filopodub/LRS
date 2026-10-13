@@ -98,6 +98,19 @@ set_target_properties(takeoff_drone PROPERTIES
 )
 
 # -----------------------------------------------------------------------------
+# Node: mission_demo_node
+# -----------------------------------------------------------------------------
+add_executable(mission_demo_node src/mission_demo_node.cpp)
+ament_target_dependencies(mission_demo_node
+  rclcpp
+)
+rosidl_get_typesupport_target(mission_demo_cpp_typesupport_target
+  ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(mission_demo_node
+  "${mission_demo_cpp_typesupport_target}"
+)
+
+# -----------------------------------------------------------------------------
 # Installation
 # -----------------------------------------------------------------------------
 install(TARGETS
@@ -105,6 +118,7 @@ install(TARGETS
   flight_assistant_node
   navigation_node
   takeoff_drone
+  mission_demo_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
