@@ -249,6 +249,9 @@ private:
     std::vector<Index3D> full_path;
     auto t_start = std::chrono::high_resolution_clock::now();
 
+    size_t total_raw_points = 0;
+    size_t total_simplified_points = 0;
+
     for (size_t i = 0; i < mission.size() - 1; ++i) {
       Index3D start_idx = pointToIndex(mission[i].x, mission[i].y, mission[i].z);
       Index3D goal_idx = pointToIndex(mission[i+1].x, mission[i+1].y, mission[i+1].z);
@@ -260,6 +263,10 @@ private:
       }
 
       std::vector<Index3D> simplified_segment = simplifyPath(segment);
+
+
+      total_raw_points += segment.size();
+      total_simplified_points += simplified_segment.size();
       if (full_path.empty()) {
         full_path.insert(full_path.end(), simplified_segment.begin(), simplified_segment.end());
       } else {
@@ -271,6 +278,22 @@ private:
     double duration_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
     RCLCPP_INFO(this->get_logger(), "Full mission path calculated in %.2f ms! Total points: %zu", duration_ms, full_path.size());
+    double reduction_percent = 0.0;
+
+    if (total_raw_points > 0) {
+      reduction_percent =
+        100.0 * (1.0 -
+        static_cast<double>(total_simplified_points) /
+        static_cast<double>(total_raw_points));
+    }
+
+    RCLCPP_INFO(
+      this->get_logger(),
+      "Mission path: raw A* = %zu points, simplified = %zu points, reduction = %.1f%%",
+      total_raw_points,
+      total_simplified_points,
+      reduction_percent
+    );
 
     // 4. Publish to planned_commands topic
     publish_path(planned_commands_pub_, full_path);

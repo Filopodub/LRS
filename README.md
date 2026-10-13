@@ -132,6 +132,11 @@ h(n)
 }
 $$
 
+The Euclidean heuristic is admissible because it represents the
+shortest possible geometric distance between the current voxel and
+the goal. Obstacles can only increase the actual path cost, so the
+heuristic never overestimates the optimal remaining cost.
+
 * **A* Cost Function**:
 
 $$
@@ -215,7 +220,7 @@ Currently, only the waypoint coordinates (`x`, `y`, `z`) are used by the path pl
 
 ---
 
-### Path Post-Processing & Shortcutting (1.0 pt)
+### 4. Path post-processing (1.0 pt)
 
 The raw A* path consists of neighboring voxels and may contain many unnecessary intermediate points.
 
@@ -237,10 +242,16 @@ This is a sampled 3D line-of-sight check rather than a classical DDA voxel trave
 
 | Route Test Case          | Mission Source                   | Raw A* Points | Simplified Points | Point Reduction | Execution Time | Safety Check |
 | ------------------------ | -------------------------------- | ------------: | ----------------: | --------------: | -------------: | ------------ |
-| **Single Waypoint Pair** | `(0, 0, 1) -> (8, 4, 2.5)`       |            42 |                 3 |       **92.8%** |       ~14.2 ms | PASSED       |
-| **Exam Mission 1**       | `exam_example.csv` (7 waypoints) |           128 |                11 |       **91.4%** |       ~48.6 ms | PASSED       |
+| **Exam Mission 1**       | `exam_example.csv` (7 waypoints) |           172 |                24 |       **86.0%** |    ~2563.44 ms | PASSED       |
 
 The reported execution time measures the complete sequential mission planning process, including the A* searches and path simplification.
+
+![Final post-processed 3D path](readme_data/final_path.png)
+
+*Figure 4: Final post-processed 3D mission path visualized in RViz. The
+displayed path is the result of 3D A* planning followed by line-of-sight
+shortcutting, and is shown together with the inflated voxel map and
+mission waypoints.*
 
 ---
 
