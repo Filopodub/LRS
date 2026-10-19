@@ -332,7 +332,10 @@ source install/setup.bash
 
 ### One-command startup
 
-Build and source the workspace, then run the unified launch file:
+Build and source the workspace, then run the unified launch file. It reports
+the simulator repository found for each assignment before asking which one to
+run. If there is no interactive terminal, it starts assignment `1` when that
+repository is available, otherwise assignment `2`.
 
 ```bash
 cd ~/ros2_ws
@@ -342,19 +345,30 @@ source install/setup.bash
 ros2 launch my_drone_control planner.launch.py
 ```
 
-The launch prompts `Open RViz? [y/N]`, then starts `map_planner_node`, optional
-RViz, Gazebo, ArduPilot SITL, MAVROS, and finally `takeoff_drone`. It uses the
-bundled `maps/map.pcd` and `missions/exam_example.csv`. Set `LRS_REPO_DIR` if
-the simulator repository is not at `~/LRS-URK`:
+Assignment `1` prompts `Open RViz? [y/N]`, then starts `map_planner_node`,
+optional RViz, Gazebo, ArduPilot SITL, MAVROS, and finally `takeoff_drone`. It
+uses the bundled `maps/map.pcd` and `missions/exam_example.csv`. Set
+`LRS_REPO_DIR` if this simulator repository is not at `~/LRS-URK`:
 
 ```bash
 LRS_REPO_DIR=/path/to/LRS-URK ros2 launch my_drone_control planner.launch.py
 ```
 
-Press **Ctrl+C** in the launch terminal to stop the managed processes. This
-launch starts the flight controller, which can arm and execute the mission
-once MAVROS connects. Use the SITL simulation and verify the selected mission
-before running it.
+Assignment `2` starts the outdoor Gazebo world, ArduPilot SITL, MAVROS, and
+`outdoor_mission` as managed processes in the launch terminal. Press **Ctrl+C**
+there once to stop the full stack. It checks `~/Documents/github/LRS-URK` first,
+then `~/LRS-URK`, and selects the first repository containing the required
+simulator scripts. Set `LRS_2_REPO_DIR` to use a different checkout:
+
+```bash
+LRS_2_REPO_DIR=/path/to/other/LRS-URK ros2 launch my_drone_control planner.launch.py
+```
+
+Assignment `1` uses `LRS_REPO_DIR` (default `~/LRS-URK`); assignment `2` uses
+`LRS_2_REPO_DIR` or its search locations above. Both modes are managed by the
+launch process and can be stopped with **Ctrl+C** in that terminal. Both start
+a flight controller that can arm and execute a mission once MAVROS connects.
+Use the SITL simulation and verify the selected mission before running it.
 
 ### Manual startup
 
@@ -480,9 +494,12 @@ mission, including waypoint task metadata, on `/planned_commands`.
 <a id="launch-file"></a>
 ## 7. Launch File
 
-`launch/planner.launch.py` is the interactive full-stack launch described in
-[How to Run](#how-to-run). It asks whether to start RViz, launches the planner,
-then starts the simulator and mission controller. Use the manual startup
-instructions when you want each process in its own terminal.
+`launch/planner.launch.py` discovers and reports both simulator repository
+paths before asking which assignment to run. Assignment `1` starts the planner
+and its simulator stack, with optional RViz; assignment `2` starts its outdoor
+world, simulator, and mission node as managed launch processes. See
+[How to Run](#how-to-run) for the distinct repository path settings. Use the
+manual startup instructions when you want processes individually managed in
+separate terminals.
 
 [Back to Contents](#contents)
