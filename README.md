@@ -6,303 +6,91 @@ A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle 
 
 - [A1.1 — Map processing and path planning](#a1-1-map-processing)
 - [A1.2 — Mission execution, indoor flight](#a1-2-mission-execution)
+- [A1.3 — Outdoor GPS mission](#a1-3-outdoor-mission)
 - [Prerequisites and build](#prerequisites-and-build)
 - [How to run](#how-to-run)
 - [ROS 2 interface](#ros-2-interface)
-- [Mission pipeline](#mission-pipeline)
-- [Implementation overview](#implementation-overview)
-- [Launch file](#launch-file)
+- [Solution diagrams](#solution-diagrams)
 
 ---
 
 <a id="a1-1-map-processing"></a>
 ## A1.1 — Map processing and path planning
 
-### 1. Map loading (1.5 pts)
+### 1. Map representation
 
-* **Map Source**: FEI LRS Point Cloud (`maps/map.pcd`).
+PCL loads `maps/map.pcd` and downsamples it into a **0.25 m uniform voxel grid**. Occupied cells are stored in a hash set for constant-average-time collision queries. This resolution preserves hangar-scale features and keeps neighbour checks simple. An octree could save memory in empty regions, but adds variable-resolution query complexity; the uniform grid uses more memory and loses features smaller than one cell. The filtered map contains 16,482 occupied voxels.
 
-* **Loader**: The map is loaded using the Point Cloud Library (PCL)
-  through `pcl::io::loadPCDFile`. The raw PCD file is stored as a
-  `pcl::PointCloud<pcl::PointXYZ>`.
+### 2. Obstacle inflation
 
-* **Downsampling Strategy**: The raw point cloud is downsampled using a 3D Voxel Grid filter (`pcl::VoxelGrid`) with a configurable leaf size of **0.25 m by default**.
+The configured `safety_radius` is **0.60 m**, estimated from 0.33 m vehicle radius, 0.15 m controller error, and 0.12 m margin. The implementation rounds `ceil(0.60 / 0.25)` up to **3 voxels**, then inflates cells satisfying `dx² + dy² + dz² <= 3²`. Thus the effective radius between voxel centres is **0.75 m**. This errs on the side of clearance but may close narrow gaps. Shelves are blocked only where they appear in the PCD; sparse map points can leave false-clear areas.
 
-* **3D Spatial Representation**: Each downsampled point is converted
-  into a discrete 3D voxel represented by `Index3D`, containing
-  integer `x`, `y`, and `z` indices. Occupied voxels are stored in an
-  `unordered_set<Index3D, Index3DHash>`, providing average-case
-  $O(1)$ occupancy lookup.
+### 3. 3D A* planning
 
+The planner uses 26-connected A* on the inflated grid, with Euclidean edge costs and an admissible Euclidean heuristic. If the search completes, it gives a lowest-cost path on the discrete voxel graph. Compared with RRT, it is deterministic and directly uses the occupancy grid; its costs are memory/runtime growth with explored cells and no continuous-space optimality. Diagonal transitions check the destination voxel only, so corner-cutting near obstacles is a known limitation.
 
-* **Coordinate Conversion**:
+The CSV (`x,y,z,precision,task`) contains ordered goal waypoints, not a path. A separate search connects each consecutive pair. Occupied endpoints or an exhausted search stop planning.
 
-  * World coordinates are converted to voxel indices using `pointToIndex()`.
-  * Voxel indices are converted back to voxel-center coordinates using `indexToPoint()`.
+### 4. Path simplification
 
-![3D voxel representation of the FEI LRS map](readme_data/voxel_grid.png)
+Greedy line-of-sight shortcutting replaces a path section with the furthest later voxel visible through the inflated grid. The example reduced **172 points to 24 (86%)** in about **2.56 s** on this machine. Segments are checked using rounded samples, which is fast but not exact voxel traversal; a collision between samples can be missed, so this is not a formal continuous collision guarantee.
 
-*Figure 1: Raw FEI LRS point cloud and its 3D voxel-grid representation
-visualized together in RViz. The map is represented directly in X, Y
-and Z rather than using stacked 2D layers.*
-
-#### Measured Map Metrics
-
-* **World Bounding Box**:
-  - $X \in [-0.30, 17.95]$ m
-  - $Y \in [-1.15, 13.20]$ m
-  - $Z \in [0.00, 5.95]$ m
-
-* **Spatial Resolution**: $0.25\text{ m}$ voxel leaf size.
-
-* **Occupied Voxel Count**: $16482$ Reported from
-  `occupied_grid_.size()` after voxelization.
-
-* **Spatial Occupancy Query**: A world-space coordinate is converted
-  to an `Index3D` using `pointToIndex()` and checked against the
-  occupancy representation. The underlying hash lookup provides
-  average-case $O(1)$ complexity.
-
----
-
-### 2. Obstacle inflation (0.5 pts)
-
-#### Safety Radius
-
-The planner uses a configurable obstacle inflation radius:
-
-```text
-safety_radius = 0.60 m
-```
-The value of $0.60$ m is based on the estimated drone body radius,
-position-controller tolerance, and an additional safety margin:
-
-$$ r_{\text{safety}} = r_{\text{drone}} + r_{\text{controller}} + r_{\text{margin}} $$
-
-Using the project values:
-
-$$ 0.33 + 0.15 + 0.12 = 0.60\text{ m} $$
-
-This provides clearance for the physical drone body as well as
-position-control error and an additional safety margin.
-
-The implementation converts the physical radius into a number of voxels:
-
-$$
-r_{\text{voxels}}
-=
-\left\lceil
-\frac{r_{\text{safety}}}{r_{\text{voxel}}}
-\right\rceil
-$$
-
-With the default values of $r_{\text{safety}} = 0.60$ m and
-$r_{\text{voxel}} = 0.25$ m, the resulting inflation radius is
-$3$ voxels.
-
-For every occupied voxel, neighboring voxels are examined in all three
-dimensions. A voxel is added to the inflated obstacle representation if:
-
-$$
-dx^2 + dy^2 + dz^2
-\leq
-r_{\text{voxels}}^2
-$$
-
-This produces a spherical 3D inflation around each occupied voxel.
-
-![3D inflated voxel grid](readme_data/voxel_inflated.png)
-
-*Figure 2: 3D inflated voxel representation visualized in RViz. The
-obstacles are expanded in X, Y and Z according to the configured
-0.60 m safety radius.*
-
-#### Steel Racks / Shelving Handling
-
-Steel shelving and other obstacles represented by the point cloud are converted
-into occupied voxels and then expanded using the 3D spherical inflation process.
-
-The inflation can fill small gaps between nearby occupied voxels, producing a
-more conservative obstacle representation. The A* planner then treats the
-resulting inflated voxels as occupied.
-
----
-
-### 3. Advanced planning algorithm — A* (2.0 pts)
-
-* **Algorithm**: 3D A* grid search using a **26-connected neighborhood**. Each voxel can have up to 26 neighboring voxels.
-
-* **Search Space**: The planner operates directly on the inflated voxel grid.
-
-* **Heuristic**: 3D Euclidean distance:
-
-$$
-h(n)
-=
-\sqrt{
-\Delta x^2 +
-\Delta y^2 +
-\Delta z^2
-}
-$$
-
-The Euclidean heuristic is admissible because it represents the
-shortest possible geometric distance between the current voxel and
-the goal. Obstacles can only increase the actual path cost, so the
-heuristic never overestimates the optimal remaining cost.
-
-* **A* Cost Function**:
-
-$$
-f(n) = g(n) + h(n)
-$$
-
-where:
-
-* $g(n)$ is the accumulated cost from the start voxel to node $n$.
-
-* $h(n)$ is the Euclidean heuristic estimate from node $n$ to the goal.
-
-* $f(n)$ is the estimated total path cost through node $n$.
-
-* **Movement Cost**:
-
-$$
-c(n,n')
-=
-\sqrt{
-\Delta x^2 +
-\Delta y^2 +
-\Delta z^2
-}
-$$
-
-This produces:
-
-* Axis-aligned movement: $1$
-
-* 2D diagonal movement: $\sqrt{2}$
-
-* 3D diagonal movement: $\sqrt{3}$
-
-* **Open Set**: A priority queue stores nodes ordered by their lowest $f$ score.
-
-* **Closed Set**: An `unordered_set` stores already expanded voxels.
-
-* **Cost Tracking**: `g_score` stores the best known cost from the start to each voxel.
-
-* **Path Reconstruction**: `came_from` stores the predecessor of each voxel. When the goal is reached, the path is reconstructed backwards and then reversed.
-
-* **Collision Checking**: Neighboring voxels contained in the inflated occupancy grid are rejected.
-
-* **Sequential Waypoint Planning**: The mission CSV is interpreted as an ordered list of waypoints. A separate A* search is performed between every pair of consecutive waypoints.
-
-* **Unreachable Goals**: If the start or goal voxel is occupied, or the A* search cannot reach the goal, an empty path is returned and mission planning stops.
-
-* **Performance Measurement**: The complete mission planning process is timed using `std::chrono::high_resolution_clock` and the elapsed time is reported in milliseconds.
-
----
-
-### Mission CSV Processing
-
-Mission waypoints are loaded from a CSV file.
-
-Expected format:
-
-```text
-x,y,z,precision,task
-```
-
-For example:
-
-```text
-0.0,0.0,1.0,0.1,takeoff
-4.0,2.0,2.0,0.1,inspection
-8.0,4.0,2.5,0.1,landing
-```
-
-The parser:
-
-* skips empty lines,
-* skips lines beginning with `#`,
-* skips the header row,
-* converts `x`, `y`, and `z` to `double`,
-* stores `precision` and `task` as strings,
-* ignores malformed numeric rows.
-
-Waypoint coordinates (`x`, `y`, `z`) determine the A* search. The `precision` and `task` fields do not affect route search; the planner preserves them on the corresponding mission waypoint when it publishes the executable mission.
-
----
-
-### 4. Path post-processing (1.0 pt)
-
-The raw A* path consists of neighboring voxels and may contain many unnecessary intermediate points.
-
-The planner therefore performs a second processing stage using `simplifyPath()`.
-
-* **Line-of-Sight Shortcutting**: The simplifier attempts to connect the current path point directly to the furthest future point that can be reached without intersecting an occupied inflated voxel.
-
-* **3D Segment Checking**: `isLineOfSightFree()` samples positions along the 3D segment between two voxel indices.
-
-* **Voxel Conversion**: The sampled coordinates are rounded to the nearest voxel index.
-
-* **Collision Check**: Every sampled voxel is checked against the inflated occupancy grid.
-
-* **Greedy Simplification**: For every current point, the algorithm searches for the furthest future point with a clear line of sight and adds that point to the simplified path.
-
-This is a sampled 3D line-of-sight check rather than a classical DDA voxel traversal algorithm.
-
-#### Waypoint Reduction Evidence
-
-| Route Test Case          | Mission Source                   | Raw A* Points | Simplified Points | Point Reduction | Execution Time | Safety Check |
-| ------------------------ | -------------------------------- | ------------: | ----------------: | --------------: | -------------: | ------------ |
-| **Exam Mission 1**       | `exam_example.csv` (7 waypoints) |           172 |                24 |       **86.0%** |    ~2563.44 ms | PASSED       |
-
-The reported execution time measures the complete sequential mission planning process, including the A* searches and path simplification.
-
-![Final post-processed 3D path](readme_data/final_path.png)
-
-*Figure 4: Final post-processed 3D mission path visualized in RViz. The
-displayed path is the result of 3D A* planning followed by line-of-sight
-shortcutting, and is shown together with the inflated voxel map and
-mission waypoints.*
+![Simplified route over the inflated map](readme_data/final_path.png)
 
 [Back to Contents](#contents)
+
+---
 
 <a id="a1-2-mission-execution"></a>
 ## A1.2 — Mission execution, indoor flight
 
-This section describes the assignment to execute the A1.1 route in the hangar
-world. The mission CSV contains **goal waypoints**, not the complete flight
-path: the planner finds a collision-free route between consecutive rows, and
-the controller performs each task at the original waypoint.
+The planner publishes `/planned_commands`; `takeoff_drone` controls MAVROS. A mission file can be selected at runtime with `-p mission_path:=/path/to/file.csv`. The controller runs at 10 Hz and `FlightAssistant` sends position setpoints at 20 Hz.
 
-Mission files use the format `x,y,z,precision,task`. The assignment requires
-loading a selected file at runtime, performing the MAVROS connection, `GUIDED`
-mode, and arm handshake with response checks, then taking off, navigating,
-performing each task in order, and landing/disarming. State transitions should
-be logged so failures identify the stage where execution stopped.
+### Position and precision
 
-The assignment distinguishes transit points from mission waypoints. Simplified
-path points between CSV rows are pass-through targets; they must not make the
-drone stop at every point. A `soft` waypoint allows transit within a looser
-position tolerance, while a `hard` waypoint requires the drone to settle before
-continuing. The selected tolerances and stability rule should be justified and
-verified during flight.
+Map positions are converted to local targets using `local_x = -map_y`, `local_y = map_x`, `local_z = map_z`.
 
-Tasks include `takeoff`, `land`, `landtakeoff` (land, then re-arm and re-enter
-`GUIDED` before continuing), and `yaw<degrees>`. Document the yaw frame and
-direction convention, hold the requested heading at a yaw waypoint, and face
-the direction of travel between waypoints. Validate the complete mission in
-simulation before using hardware.
+| Precision | Position radius | Yaw tolerance |
+| --- | ---: | ---: |
+| `soft` | 0.30 m | 10° |
+| `hard` | 0.15 m | 5° |
 
-### A1.2 acceptance checklist
+The tighter hard radius is intended for accurate task goals; the looser soft radius allows more transit tolerance. **Known limits:** arrival is a single position/yaw sample, without a settling period or velocity check. Intermediate planned points are also processed in order and can inherit hard precision, so they may cause stops instead of passing through.
 
-- The mission runs end-to-end from a runtime-selected mission file and lands safely.
-- Tasks execute at the original mission waypoints, not at every planner point.
-- `hard` and `soft` behavior is visibly different; hard arrival includes settling.
-- The vehicle faces along each segment and holds commanded yaw tasks.
-- The route avoids inflated obstacles, including the shelving racks.
+### Tasks and heading
+
+`takeoff` uses the first takeoff row's Z (or the `target_altitude` parameter) and monitors relative altitude. `land` lowers the local Z target and exits near ground level; it does not request LAND mode or confirm disarming. `landtakeoff` descends and climbs again but does not re-arm or restore GUIDED after touchdown.
+
+Yaw setpoints use ROS ENU: zero is East and positive is counter-clockwise. `yaw<degrees>` adds to an internal target that starts at zero, rather than the measured aircraft heading. The controller does not calculate the next segment bearing or unwrap to the shortest turn, so forward-facing travel and reliable absolute/relative yaw tasks remain incomplete. MAVROS converts ENU targets to the FCU's NED convention.
+
+[Back to Contents](#contents)
+
+---
+
+<a id="a1-3-outdoor-mission"></a>
+## A1.3 — Outdoor GPS mission
+
+The outdoor mission is relative to the captured home/origin: **takeoff → square → POI transit → figure-8 → return → land**. Parameters keep the required 5 m altitude, 5 m square, and 3 m amplitude. The default `figure_eight_omega = 0.25 rad/s` gives peak speed `Aω√2 ≈ 1.06 m/s` and lap time `2π/ω ≈ 25.1 s`.
+
+### GPS, coordinates, compass, and altitude
+
+The node waits for a fresh valid GPS fix and at least six satellites before requesting mode or arming. It prefers MAVROS home, falling back to the first usable fix after five seconds. Planning offsets are local ENU, not fixed absolute coordinates. Geodetic-to-ENU and inverse conversions use a flat-Earth tangent approximation with the equatorial radius. Over 50 m, curvature contributes under 1 mm; the radius approximation contributes about 0.2% scale error (about 0.1 m), before GPS error.
+
+GPS altitude is AMSL; `/mavros/global_position/rel_alt` is above home; setpoint Z is local ENU up. The mission requests 5 m takeoff and checks relative altitude. Compass is magnetic degrees clockwise from North; pose/setpoint yaw is ENU degrees counter-clockwise from East, with `yaw_ENU = wrap(90° - heading)`. The node logs both conventions for comparison; empirical agreement while rotating in SITL still needs validation. Yaw aims horizontally at the POI; no camera pitch is commanded.
+
+### Square, trajectory, and return
+
+At 20 Hz, the node recomputes bearing to the parameterized POI while following the four 5 m square edges. It then transits to the POI before starting the timer-driven figure-8:
+
+$$x=x_{POI}+A\sin(t),\quad y=y_{POI}+A\sin(t)\cos(t),\quad t=\omega(now-t_{start})$$
+
+For default offsets (2.5 m East, -2.5 m North), the square’s far corner is 7.07 m from launch; the farthest figure-8 point is about 6.37 m from launch. The square therefore sets the 7.07 m horizontal bound. Add launch-to-home offset when checking the home-centred geofence; the node does not enforce a geofence. Tangent yaw is commanded with each setpoint and unwrapped between updates. Smooth tracking and completion have not yet been evidenced by a full SITL run.
+
+After one lap it returns to launch and requests LAND. `/outdoor_mission/abort` also requests LAND. If FCU/GPS/pose freshness or GUIDED mode is lost in flight, it stops publishing mission setpoints. Demonstrate abort and full mission in SITL before any real flight; an instructor and safety pilot are required.
+
+```bash
+ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
+```
 
 [Back to Contents](#contents)
 
@@ -332,7 +120,8 @@ source install/setup.bash
 
 ### One-command startup
 
-Build and source the workspace, then run the unified launch file:
+Build and source the workspace, then run this command to start either complete
+simulation stack:
 
 ```bash
 cd ~/ros2_ws
@@ -342,29 +131,42 @@ source install/setup.bash
 ros2 launch my_drone_control planner.launch.py
 ```
 
-The launch prompts `Open RViz? [y/N]`, then starts `map_planner_node`, optional
-RViz, Gazebo, ArduPilot SITL, MAVROS, and finally `takeoff_drone`. It uses the
-bundled `maps/map.pcd` and `missions/exam_example.csv`. Set `LRS_REPO_DIR` if
-the simulator repository is not at `~/LRS-URK`:
+**Startup pipeline**
 
-```bash
-LRS_REPO_DIR=/path/to/LRS-URK ros2 launch my_drone_control planner.launch.py
-```
+1. **Find simulator checkouts.** The launch searches for the repositories and
+  prints the paths it found. Override the defaults with `LRS_REPO_DIR` and
+  `LRS_2_REPO_DIR`.
+2. **Choose an assignment.** Select `1` for indoor or `2` for outdoor. For
+  assignment `1`, answer whether to open RViz.
+3. **Start the mission node.** Assignment `1` starts `map_planner_node` with
+  the bundled map and `missions/exam_example.csv`. Assignment `2` starts
+  `outdoor_mission`, which waits for GPS readiness before requesting flight
+  mode or arming.
+4. **Start Gazebo.** Assignment `1` uses the hangar world; assignment `2` uses
+  the outdoor world. Optional RViz starts alongside the indoor planner.
+5. **Start ArduPilot SITL.** It starts 5 seconds after Gazebo.
+6. **Start MAVROS.** It starts 5 seconds after SITL.
+7. **Begin control.** For assignment `1`, `takeoff_drone` starts 10
+  seconds after MAVROS. Assignment `2` is already running and proceeds when
+  its GPS and MAVROS readiness checks pass.
 
-Press **Ctrl+C** in the launch terminal to stop the managed processes. This
-launch starts the flight controller, which can arm and execute the mission
-once MAVROS connects. Use the SITL simulation and verify the selected mission
-before running it.
+All processes are managed by the launch. Press **Ctrl+C once in the launch
+terminal** to stop the stack. See [A1.3](#a1-3-outdoor-mission) for the outdoor
+mission details.
 
 ### Manual startup
 
-Use separate terminals to inspect or control processes individually. In each
-ROS terminal, first source ROS and the workspace:
+Use separate terminals to inspect or control processes individually. The
+commands use `~/LRS-URK`; change that directory to the location of your LRS-URK
+repository if it is elsewhere. In each ROS terminal, source ROS and the
+workspace:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
 ```
+
+#### Assignment 1: indoor mission
 
 Start the following processes in order:
 
@@ -396,14 +198,52 @@ Start the following processes in order:
   rviz2 -d $(ros2 pkg prefix my_drone_control)/share/my_drone_control/config/planner_view.rviz
   ```
 
-Stop each manual process with Ctrl+C in its terminal. To use another mission
-CSV, pass it to the planner:
+For a different mission CSV, pass its path to `map_planner_node`:
 
 ```bash
 ros2 run my_drone_control map_planner_node --ros-args -p mission_path:=/path/to/mission.csv
 ```
 
 The planner also accepts `map_path`, `voxel_size`, and `safety_radius` overrides.
+
+#### Assignment 2: outdoor mission
+
+Open four terminals. In each ROS terminal, source ROS and the workspace as
+shown above. Use the same LRS-URK checkout in the first three terminals.
+
+1. **Outdoor Gazebo world:**
+  ```bash
+  cd ~/LRS-URK
+  ./scripts/run_gazebo.sh fei_lrs_outdoor.world
+  ```
+2. **ArduPilot SITL:** use the home coordinates matching the outdoor world's
+  spherical coordinates:
+  ```bash
+  cd ~/LRS-URK
+  HOME_LOCATION="${HOME_LOCATION:-48.15144444,17.07375000,150,0}" \
+    ./scripts/run_sitl.sh
+  ```
+3. **MAVROS:** in another sourced terminal:
+  ```bash
+  cd ~/LRS-URK
+  ./scripts/run_mavros.sh
+  ```
+4. **Outdoor mission node:** in the fourth sourced terminal:
+  ```bash
+  ros2 run my_drone_control outdoor_mission
+  ```
+
+Start the mission node after MAVROS is publishing data. It waits for a fresh
+usable GPS fix and the configured satellite count before requesting flight
+mode or arming. Stop each manually started process with **Ctrl+C in its own
+terminal**. During flight, the abort service requests LAND:
+
+```bash
+ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
+```
+
+Read [A1.3](#a1-3-outdoor-mission) and follow the safety checklist before
+running this mission, especially before any real-drone flight.
 
 [Back to Contents](#contents)
 
@@ -412,77 +252,101 @@ The planner also accepts `map_path`, `voxel_size`, and `safety_radius` overrides
 <a id="ros-2-interface"></a>
 ## 4. ROS 2 Interface
 
-### Published Topics
+### Topics
 
-All publishers use a QoS profile with depth `1` and `transient_local` durability.
-
-| Topic | Type | Description |
+| Data | Topic | Type |
 | --- | --- | --- |
-| `/map_raw` | `sensor_msgs/msg/PointCloud2` | Original PCD point cloud. |
-| `/voxel_grid` | `sensor_msgs/msg/PointCloud2` | Downsampled point cloud produced by the PCL VoxelGrid filter. |
-| `/voxel_inflated` | `sensor_msgs/msg/PointCloud2` | Inflated 3D occupancy representation. |
-| `/planned_path` | `nav_msgs/msg/Path` | Simplified route for RViz visualization. |
-| `/planned_commands` | `my_drone_control/msg/PlannedMission` | Executable route with mission precision and task metadata for `takeoff_drone`. |
+| Planner outputs | `/map_raw`, `/voxel_grid`, `/voxel_inflated` | `sensor_msgs/msg/PointCloud2` |
+| Planned route | `/planned_path` | `nav_msgs/msg/Path` |
+| Executable mission | `/planned_commands` | `my_drone_control/msg/PlannedMission` |
+| Waypoint display | `/mission_markers` | `visualization_msgs/msg/MarkerArray` |
+| Indoor position target | `/mavros/setpoint_position/local` | `geometry_msgs/msg/PoseStamped` |
+| Outdoor position/yaw target | `/mavros/setpoint_raw/local` | `mavros_msgs/msg/PositionTarget` |
+| MAVROS feedback | `/mavros/state`, `/mavros/local_position/pose`, `/mavros/global_position/*` | `mavros_msgs`, `geometry_msgs`, `sensor_msgs`, `std_msgs` |
 
-All map and route positions use the `map` frame. The mission topic uses
-transient-local durability so the takeoff node can receive a mission published
-before it starts.
+Planner outputs and `/planned_commands` use depth-1 transient-local QoS. MAVROS
+sensor inputs use `SensorDataQoS`; state uses depth 10. The planner and indoor
+controller use the `map` frame; the outdoor controller computes ENU targets and
+MAVROS converts them for the FCU.
 
-### Parameters
+### Services
 
-| Parameter       | Type     |                                                             Default | Description                          |
-| --------------- | -------- | ------------------------------------------------------------------: | ------------------------------------ |
-| `map_path`      | `string` |              `/home/user/ros2_ws/src/my_drone_control/maps/map.pcd` | Path to the PCD map file.            |
-| `mission_path`  | `string` | `/home/user/ros2_ws/src/my_drone_control/missions/exam_example.csv` | Path to the mission CSV file.        |
-| `voxel_size`    | `double` |                                                              `0.25` | Voxel-grid resolution in meters.     |
-| `safety_radius` | `double` |                                                              `0.60` | Obstacle inflation radius in meters. |
+- MAVROS clients: `/mavros/set_mode`, `/mavros/cmd/arming`, `/mavros/cmd/takeoff`.
+- Outdoor abort server: `/outdoor_mission/abort` (`std_srvs/srv/Trigger`); it requests LAND.
 
-> **Note:** The default paths are absolute paths from the development workspace and may need to be changed when the package is used in another workspace or on another computer.
-
-[Back to Contents](#contents)
-
----
-
-<a id="mission-pipeline"></a>
-## 5. Mission Pipeline
-
-```text
-PCD map -> voxel grid -> inflated occupancy map
-          |
-Mission CSV -> sequential A* -> simplified route
-          |
-         +------------+-------------+
-         |                          |
-         v                          v
-   /planned_path (Path)       /planned_commands
-     RViz                 (PlannedMission)
-                |
-                v
-            takeoff_drone
+```bash
+ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
 ```
 
+### Messages and parameters
+
+`PlannedCommand` contains `float64 x, y, z`, `string precision`, and `string task`;
+`PlannedMission` contains `PlannedCommand[] commands`. Planner parameters are
+`map_path`, `mission_path`, `voxel_size` (0.25 m), and `safety_radius` (0.60 m).
+
+The indoor controller exposes `report_only`, `target_altitude`, `flight_mode`,
+`altitude_tolerance`, `connection_timeout`, and `takeoff_timeout`. The last two
+are currently declared but not enforced by the control loop. Outdoor mission
+parameters, with defaults, are `target_altitude=5.0`, `altitude_tolerance=0.3`,
+`min_satellites=6`, `flight_mode=GUIDED`, `home_timeout=5.0`, `hover_time=2.0`,
+`square_side=5.0`, `square_speed=1.0`, `poi_east_offset=2.5`,
+`poi_north_offset=-2.5`, `figure_eight_amplitude=3.0`,
+`figure_eight_omega=0.25`, `position_tolerance=0.3`, `yaw_tolerance=5.0`, and
+`landing_tolerance=0.3` (SI units except angles in degrees and rate in rad/s).
+Set parameters with `--ros-args -p name:=value`.
+
+All nodes currently use the default single-threaded `rclcpp::spin`; there are
+no custom callback groups or ROS Actions. Timer rates: indoor control 10 Hz,
+indoor setpoints 20 Hz, outdoor control 10 Hz, outdoor setpoints 20 Hz, and
+outdoor reporting 1 Hz.
+
+Launch environment variables: `LRS_REPO_DIR` selects the indoor simulator
+checkout; `LRS_2_REPO_DIR` selects the outdoor checkout; `HOME_LOCATION` sets
+the outdoor SITL origin to match the world. The planner's default map and CSV
+paths are workspace-specific.
+
 [Back to Contents](#contents)
 
 ---
 
-<a id="implementation-overview"></a>
-## 6. Implementation Overview
+<a id="solution-diagrams"></a>
+## 5. Solution Diagrams
 
-The planner loads the PCD and mission CSV, builds an inflated voxel map, runs
-3D A* between consecutive mission waypoints, and simplifies each route segment.
-It publishes the route for visualization on `/planned_path` and the executable
-mission, including waypoint task metadata, on `/planned_commands`.
+### Data path
+
+```mermaid
+flowchart LR
+  PCD["map.pcd"] --> Load["PCL load + 0.25 m voxelize"]
+  Load --> Inflate["Inflate occupied cells: ceil(0.60/0.25) = 3 voxels"]
+  Inflate --> Grid["Inflated occupancy hash"]
+  CSV["Mission CSV: ordered goal rows"] --> AStar["26-connected A* per goal pair"]
+  Grid --> AStar
+  AStar --> LOS["Greedy sampled line-of-sight simplification"]
+  LOS --> Path["/planned_path for RViz"]
+  LOS --> Commands["/planned_commands"]
+  Commands --> Indoor["takeoff_drone → /mavros/setpoint_position/local"]
+```
+
+### ROS control
+
+```mermaid
+flowchart LR
+  Planner["map_planner_node\nSingleThreadedExecutor"] -->|"/planned_commands\ntransient-local"| Indoor["takeoff_drone + FlightAssistant\nSingleThreadedExecutor"]
+  Indoor -->|"PoseStamped setpoints"| Mavros["MAVROS"]
+  Mavros -->|"state, pose, rel_alt"| Indoor
+  Outdoor["outdoor_mission\nSingleThreadedExecutor"] -->|"PositionTarget at 20 Hz"| Mavros
+  Mavros -->|"state, GPS, home, compass, pose, rel_alt"| Outdoor
+  Outdoor -.->|"abort Trigger → SetMode LAND"| Mavros
+  Mavros <--> SITL["ArduPilot SITL"]
+  SITL <--> Gazebo["Gazebo"]
+```
+
+The demo publisher can replace `map_planner_node` as the `/planned_commands`
+source for controller testing. No dedicated executor threads or callback
+ groups are configured.
+
+Editable Draw.io source: [docs/LRS.drawio](docs/LRS.drawio).
 
 [Back to Contents](#contents)
 
 ---
-
-<a id="launch-file"></a>
-## 7. Launch File
-
-`launch/planner.launch.py` is the interactive full-stack launch described in
-[How to Run](#how-to-run). It asks whether to start RViz, launches the planner,
-then starts the simulator and mission controller. Use the manual startup
-instructions when you want each process in its own terminal.
-
-[Back to Contents](#contents)

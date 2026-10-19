@@ -61,7 +61,7 @@ private:
   rclcpp::TimerBase::SharedPtr publish_timer_;
 };
 
-}  // namespace my_drone_control
+}  
 
 int main(int argc, char **argv)
 {
