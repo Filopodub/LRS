@@ -639,7 +639,7 @@ void OutdoorMission::request_takeoff()
     });
 }
 
-}  // namespace my_drone_control
+}  
 
 int main(int argc, char ** argv)
 {

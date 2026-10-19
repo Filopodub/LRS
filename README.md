@@ -272,37 +272,88 @@ mission waypoints.*
 <a id="a1-2-mission-execution"></a>
 ## A1.2 — Mission execution, indoor flight
 
-This section describes the assignment to execute the A1.1 route in the hangar
-world. The mission CSV contains **goal waypoints**, not the complete flight
-path: the planner finds a collision-free route between consecutive rows, and
-the controller performs each task at the original waypoint.
+**Mission data.** A CSV row is a goal, not a path point. The planner searches
+between rows and publishes the simplified route plus each goal's task metadata.
+Rows use `x,y,z,precision,task` in map coordinates, metres; example tasks are
+`takeoff`, `yaw180`, `landtakeoff`, and `land`.
 
-Mission files use the format `x,y,z,precision,task`. The assignment requires
-loading a selected file at runtime, performing the MAVROS connection, `GUIDED`
-mode, and arm handshake with response checks, then taking off, navigating,
-performing each task in order, and landing/disarming. State transitions should
-be logged so failures identify the stage where execution stopped.
+### 1. Controller and mission flow (1.5 points)
 
-The assignment distinguishes transit points from mission waypoints. Simplified
-path points between CSV rows are pass-through targets; they must not make the
-drone stop at every point. A `soft` waypoint allows transit within a looser
-position tolerance, while a `hard` waypoint requires the drone to settle before
-continuing. The selected tolerances and stability rule should be justified and
-verified during flight.
+**Nodes:** `map_planner_node` reads and plans the CSV; `takeoff_drone` receives
+`/planned_commands` and controls MAVROS. The mission topic is transient-local,
+so the controller can start after the planner.
 
-Tasks include `takeoff`, `land`, `landtakeoff` (land, then re-arm and re-enter
-`GUIDED` before continuing), and `yaw<degrees>`. Document the yaw frame and
-direction convention, hold the requested heading at a yaw waypoint, and face
-the direction of travel between waypoints. Validate the complete mission in
-simulation before using hardware.
+**Runtime mission selection:** pass a different CSV path without rebuilding:
 
-### A1.2 acceptance checklist
+```bash
+ros2 run my_drone_control map_planner_node --ros-args \
+  -p mission_path:=/absolute/path/to/mission.csv
+```
 
-- The mission runs end-to-end from a runtime-selected mission file and lands safely.
-- Tasks execute at the original mission waypoints, not at every planner point.
-- `hard` and `soft` behavior is visibly different; hard arrival includes settling.
-- The vehicle faces along each segment and holds commanded yaw tasks.
-- The route avoids inflated obstacles, including the shelving racks.
+The controller runs at **10 Hz**. It waits for FCU connection, requests and
+observes `GUIDED`, arms, then waits for takeoff altitude on
+`/mavros/global_position/rel_alt`. MAVROS responses are checked for mode and
+arm requests. `FlightAssistant` republishes the position target at **20 Hz**.
+
+**Current gap:** progress is controlled by flags rather than a named state
+machine. Some transitions are logged, but not all with timestamps. Takeoff is
+marked requested before its service response, and rejection is not retried.
+
+**Manual setup:** follow the LRS-URK README to start the hangar Gazebo world,
+ArduPilot SITL, and MAVROS in three terminals. Then start planner and controller
+in sourced ROS terminals. Keeping SITL visible helps diagnose pre-arm failures.
+
+### 2. Position and precision (2.0 points)
+
+`FlightAssistant` transforms map positions to local setpoints using
+`local_x = -map_y`, `local_y = map_x`, and `local_z = map_z`. It publishes
+continuously on `/mavros/setpoint_position/local`.
+
+| Mode | Position radius | Yaw tolerance | Purpose |
+| --- | ---: | ---: | --- |
+| **soft** | 0.30 m | 10° | Looser transit tolerance. |
+| **hard** | 0.15 m | 5° | Closer positioning at task goals. |
+
+The tighter hard radius makes the distinction measurable; the larger soft
+radius gives more tolerance during transit. **Current gap:** arrival checks
+position and yaw for a single sample. There is no velocity check or settling
+time, so passing briefly through the hard radius can count as arrival. Also,
+intermediate simplified path points are processed in sequence with inherited
+precision; they are not guaranteed to be pass-through. Only original CSV goals
+should trigger hard/soft handling and tasks.
+
+### 3. Flight tasks (1.5 points)
+
+| Task | Current behavior | Remaining work |
+| --- | --- | --- |
+| **`takeoff`** | Uses the first takeoff row's Z (or `target_altitude`) and monitors relative altitude. | Retry and report rejected takeoff requests correctly. |
+| **`land`** | Commands local Z to zero; exits when relative altitude is low. | Request LAND mode and verify disarm. |
+| **`landtakeoff`** | Descends to zero, then commands the row's Z and waits to climb. | Handle touchdown disarm, re-arm, and re-enter GUIDED. |
+
+Mission altitude is checked using `/mavros/global_position/rel_alt` (above
+home), not GPS AMSL. The current land behaviors do not yet meet the complete
+safe-landing requirements.
+
+### 4. Yaw and travel heading (1.0 point)
+
+Yaw tasks are parsed from `yaw<degrees>` and added to the assistant's target.
+Setpoint yaw uses **ENU**: zero points East; positive angles rotate
+counter-clockwise. The controller checks measured pose yaw against the target
+before advancing.
+
+**Current gap:** target yaw starts at zero rather than measured heading, so
+`yaw180` is not reliably absolute or relative to the actual aircraft heading.
+Between goals, the controller does not compute the segment bearing
+`atan2(Δy, Δx)` and may keep the previous yaw. Initialize from measured yaw,
+unwrap to the shortest rotation, and face each segment to meet the assignment.
+
+### Acceptance checklist
+
+- [ ] Run an arbitrary CSV end to end; log every state transition and handle rejected services.
+- [ ] Show stable hard arrivals, soft pass-through, and no stopping at intermediate path points.
+- [ ] Complete landing and `landtakeoff`, including mode changes and re-arming.
+- [ ] Verify ENU yaw tasks and forward-facing travel through angle wrap-around.
+- [ ] Confirm rack clearance and record a complete successful SITL run.
 
 [Back to Contents](#contents)
 
