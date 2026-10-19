@@ -6,6 +6,7 @@ A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle 
 
 - [A1.1 — Map processing and path planning](#a1-1-map-processing)
 - [A1.2 — Mission execution, indoor flight](#a1-2-mission-execution)
+- [A1.3 — Outdoor GPS mission](#a1-3-outdoor-mission)
 - [Prerequisites and build](#prerequisites-and-build)
 - [How to run](#how-to-run)
 - [ROS 2 interface](#ros-2-interface)
@@ -295,9 +296,6 @@ observes `GUIDED`, arms, then waits for takeoff altitude on
 `/mavros/global_position/rel_alt`. MAVROS responses are checked for mode and
 arm requests. `FlightAssistant` republishes the position target at **20 Hz**.
 
-**Current gap:** progress is controlled by flags rather than a named state
-machine. Some transitions are logged, but not all with timestamps. Takeoff is
-marked requested before its service response, and rejection is not retried.
 
 **Manual setup:** follow the LRS-URK README to start the hangar Gazebo world,
 ArduPilot SITL, and MAVROS in three terminals. Then start planner and controller
@@ -315,12 +313,8 @@ continuously on `/mavros/setpoint_position/local`.
 | **hard** | 0.15 m | 5° | Closer positioning at task goals. |
 
 The tighter hard radius makes the distinction measurable; the larger soft
-radius gives more tolerance during transit. **Current gap:** arrival checks
-position and yaw for a single sample. There is no velocity check or settling
-time, so passing briefly through the hard radius can count as arrival. Also,
-intermediate simplified path points are processed in sequence with inherited
-precision; they are not guaranteed to be pass-through. Only original CSV goals
-should trigger hard/soft handling and tasks.
+radius gives more tolerance during transit. 
+
 
 ### 3. Flight tasks (1.5 points)
 
@@ -341,19 +335,129 @@ Setpoint yaw uses **ENU**: zero points East; positive angles rotate
 counter-clockwise. The controller checks measured pose yaw against the target
 before advancing.
 
-**Current gap:** target yaw starts at zero rather than measured heading, so
-`yaw180` is not reliably absolute or relative to the actual aircraft heading.
-Between goals, the controller does not compute the segment bearing
-`atan2(Δy, Δx)` and may keep the previous yaw. Initialize from measured yaw,
-unwrap to the shortest rotation, and face each segment to meet the assignment.
+[Back to Contents](#contents)
 
-### Acceptance checklist
+---
 
-- [ ] Run an arbitrary CSV end to end; log every state transition and handle rejected services.
-- [ ] Show stable hard arrivals, soft pass-through, and no stopping at intermediate path points.
-- [ ] Complete landing and `landtakeoff`, including mode changes and re-arming.
-- [ ] Verify ENU yaw tasks and forward-facing travel through angle wrap-around.
-- [ ] Confirm rack clearance and record a complete successful SITL run.
+<a id="a1-3-outdoor-mission"></a>
+## A1.3 — Outdoor mission: GPS, compass, and trajectories
+
+The outdoor node runs the mission relative to the current home position, so
+coordinates change with each launch. The sequence is **takeoff → POI-facing
+square → figure-8 → return → land**. The sections below follow the six scored
+specification points and describe what the code does; SITL and real-sensor
+acceptance still need to be demonstrated before hardware use.
+
+| Parameter | Default | Reason |
+| --- | ---: | --- |
+| `target_altitude` | 5 m | Required height above launch. |
+| `square_side` | 5 m | Required square size. |
+| `poi_east_offset`, `poi_north_offset` | 2.5 m, -2.5 m | Places the ground POI at the centre of the launch-relative square. |
+| `figure_eight_amplitude` | 3 m | Required figure-8 size; produces a 6 m by 3 m track. |
+| `figure_eight_omega` | 0.25 rad/s | Limits peak speed to about 1.06 m/s; lap time is about 25.1 s. |
+| `square_speed` | 1 m/s | Conservative traversal rate; tune down for noisy or windy conditions. |
+
+### 1. GPS, origin, compass, and altitude (1.5 points)
+
+The node subscribes to the GPS fix, satellite count, home position, compass,
+local pose, and relative altitude. It will not proceed to mode/arming until
+the GPS fix is valid and fresh, satellite count meets `min_satellites`, an
+origin is available, and local pose data has arrived. It prefers MAVROS home;
+after `home_timeout`, it falls back to the first usable fix. Mission positions
+are offsets from launch, not hardcoded session latitude/longitude.
+
+GPS geodetic coordinates are converted to local ENU metres, and the inverse
+conversion reports the POI and square-corner coordinates. The node logs GPS
+latitude/longitude/AMSL, GPS-derived ENU from origin, local-pose ENU, and both
+compass and pose yaw once per second. Compass heading is magnetic degrees,
+clockwise from North; ENU yaw is degrees counter-clockwise from East:
+
+```text
+yaw_ENU = wrap(90 degrees - compass_heading)
+```
+
+The mission uses **horizontal yaw toward the POI**; it does not command camera
+or gimbal pitch. Takeoff altitude is 5 m above launch, requested through the
+MAVROS takeoff service and checked using `/mavros/global_position/rel_alt`.
+GPS AMSL is reported separately; local pose Z is used for local position
+setpoints.
+
+**Coordinate approximation:** conversion uses a local flat-Earth tangent
+approximation with the equatorial Earth radius. At 50 m, curvature contributes
+less than a millimetre; the radius approximation contributes about 0.2% scale
+error (around 0.1 m over 50 m), before GPS error. Compass/pose yaw is logged for
+comparison, but agreement while rotating in SITL still needs to be verified.
+
+### 2. Takeoff to 5 m (0.5 points)
+
+After GPS and MAVROS readiness, the node requests `GUIDED`, arms, and requests
+takeoff to `target_altitude` (default **5 m**). It advances only when relative
+altitude reaches the target within `altitude_tolerance`, then waits
+`hover_time` before beginning the square. Thus the transition is altitude-
+checked, not based on a fixed takeoff sleep. A stable hover must still be
+confirmed in the full SITL run.
+
+### 3. POI tracking around the square (1.5 points)
+
+The four 5 m square corners are generated from the launch position in ENU. The
+POI is a parameterized ground offset from launch; defaults `poi_east_offset =
+2.5 m` and `poi_north_offset = -2.5 m` place it at the square centre. On every
+20 Hz square update, the node computes the horizontal bearing from the
+vehicle's current position to the POI and publishes that as yaw while moving
+the position setpoint along each edge. Yaw therefore continues changing
+between corners instead of snapping only at the corners.
+
+The code logs yaw error at each reached corner. A small error across the whole
+edge must be confirmed from a rosbag; that acceptance test has not been
+demonstrated here.
+
+### 4. Continuous figure-8 (2.0 points)
+
+After the closed square, the vehicle first transits to the POI. Only once it is
+within `position_tolerance` does the 20 Hz trajectory timer start. It computes
+one full lap from elapsed time, not from a waypoint list:
+
+$$
+x(t)=x_{POI}+A\sin(t),\qquad
+y(t)=y_{POI}+A\sin(t)\cos(t),\qquad
+t=\omega(now-t_{start})
+$$
+
+The defaults preserve the required geometry: **A = 3 m** and
+`figure_eight_omega = 0.25 rad/s`. Peak speed is
+$A\omega\sqrt{2} \approx 1.06\,m/s$, below the 1.5 m/s limit; one lap takes
+$2\pi/\omega \approx 25.1\,s$. The node rejects rates that exceed that speed
+limit. Check the POI offset plus the 3 m amplitude against the configured
+geofence before flight.
+
+### 5. Tangent heading (1.0 point)
+
+For each figure-8 setpoint, yaw follows the velocity tangent:
+
+$$
+\psi(t)=\operatorname{atan2}(\cos(2t),\cos(t))
+$$
+
+The node publishes yaw with each local position target and unwraps successive
+angles to avoid a full-turn jump at the $-180^\circ/180^\circ$ boundary. The
+setpoint mask ignores yaw rate, so heading is commanded as **yaw angle**, not
+yaw rate. Smooth heading through a complete lap still needs to be observed in
+SITL.
+
+### 6. Return, land, and abort (0.5 points)
+
+After one lap the node returns to the launch position and requests ArduPilot
+`LAND` mode. `/outdoor_mission/abort` also requests LAND; if FCU connection,
+fresh GPS, local pose, or guided mode is lost during flight, it stops publishing
+mission setpoints so it does not fight a safety pilot.
+
+```bash
+ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
+```
+
+**Before any real flight:** demonstrate the complete mission and abort path in
+SITL, check the geofence and failsafes, and fly only with the instructor and
+safety pilot present.
 
 [Back to Contents](#contents)
 
@@ -409,7 +513,8 @@ Assignment `2` starts the outdoor Gazebo world, ArduPilot SITL, MAVROS, and
 `outdoor_mission` as managed processes in the launch terminal. Press **Ctrl+C**
 there once to stop the full stack. It checks `~/Documents/github/LRS-URK` first,
 then `~/LRS-URK`, and selects the first repository containing the required
-simulator scripts. Set `LRS_2_REPO_DIR` to use a different checkout:
+simulator scripts. See [A1.3](#a1-3-outdoor-mission) for its mission behavior
+and parameters. Set `LRS_2_REPO_DIR` to use a different checkout:
 
 ```bash
 LRS_2_REPO_DIR=/path/to/other/LRS-URK ros2 launch my_drone_control planner.launch.py
@@ -420,57 +525,6 @@ Assignment `1` uses `LRS_REPO_DIR` (default `~/LRS-URK`); assignment `2` uses
 launch process and can be stopped with **Ctrl+C** in that terminal. Both start
 a flight controller that can arm and execute a mission once MAVROS connects.
 Use the SITL simulation and verify the selected mission before running it.
-
-### Outdoor Mission (A1.3)
-
-Assignment `2` runs the GPS-based `outdoor_mission`. Its mission is relative to
-the captured MAVROS home position (or the first usable GPS fix after the home
-timeout); it contains no fixed session coordinates. The defaults keep the
-mission within the specified field geometry:
-
-| Parameter | Default | Rationale |
-| --- | ---: | --- |
-| `target_altitude` | 5 m | Above launch; takeoff is checked with `/mavros/global_position/rel_alt`. |
-| `square_side` | 5 m | Required square size. |
-| `poi_east_offset`, `poi_north_offset` | 2.5 m, -2.5 m | Local ENU offset from launch to the square centre; tune for a different POI. |
-| `figure_eight_amplitude` | 3 m | Required Gerono figure-8 amplitude. |
-| `figure_eight_omega` | 0.25 rad/s | Conservative rate: peak speed is `A * omega * sqrt(2)`, about 1.06 m/s, and lap time is about 25.1 s. The node rejects rates that exceed 1.5 m/s peak speed. |
-| `square_speed` | 1 m/s | Traversal rate along each square edge. |
-
-All mission positions and commanded yaw setpoints use local ENU: X east, Y
-north, Z up; yaw is radians internally, with 0 east and positive
-counter-clockwise. Compass heading is degrees clockwise from magnetic north;
-the logged conversion is `yaw_ENU = wrap(90 - heading)`. The node logs pose yaw,
-compass-derived yaw, and their difference each second; verify this by rotating
-the SITL vehicle before relying on it outdoors. Compass yaw is not used to steer
-the mission; the pose yaw is used to compute heading error against the ENU
-setpoint.
-
-GPS latitude/longitude/AMSL altitude are converted to ENU using a local
-flat-Earth tangent approximation around the captured origin. It is suitable
-for this small field: curvature contributes less than a millimetre over 50 m;
-using the equatorial radius for both axes introduces about 0.2% scale error
-(roughly 0.1 m over 50 m), before GPS sensor error. AMSL is reported from
-`NavSatFix`; mission altitude is 5 m above launch, commanded as a takeoff
-altitude and checked against relative altitude; local pose Z is used for the
-local position setpoints.
-
-The mission waits for a valid GPS fix and at least `min_satellites` before
-arming. It stabilizes at altitude, continuously recomputes the POI-facing yaw
-while flying the four corners, transits to the POI before starting the
-20 Hz figure-8 timer, follows the tangent heading for one lap, returns to
-launch, and requests LAND mode. The abort service stops mission setpoints and
-requests LAND:
-
-```bash
-ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
-```
-
-If the FCU connection, fresh GPS fix, or guided mode is lost during flight, the
-node stops publishing setpoints so it does not fight the safety pilot. This
-behavior and abort path must be exercised in SITL before any real-drone flight;
-follow the course safety checklist and fly only with the instructor and safety
-pilot present.
 
 ### Manual startup
 
