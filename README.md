@@ -487,10 +487,8 @@ source install/setup.bash
 
 ### One-command startup
 
-Build and source the workspace, then run the unified launch file. It reports
-the simulator repository found for each assignment before asking which one to
-run. If there is no interactive terminal, it starts assignment `1` when that
-repository is available, otherwise assignment `2`.
+Build and source the workspace, then run this command to start either complete
+simulation stack:
 
 ```bash
 cd ~/ros2_ws
@@ -500,41 +498,42 @@ source install/setup.bash
 ros2 launch my_drone_control planner.launch.py
 ```
 
-Assignment `1` prompts `Open RViz? [y/N]`, then starts `map_planner_node`,
-optional RViz, Gazebo, ArduPilot SITL, MAVROS, and finally `takeoff_drone`. It
-uses the bundled `maps/map.pcd` and `missions/exam_example.csv`. Set
-`LRS_REPO_DIR` if this simulator repository is not at `~/LRS-URK`:
+**Startup pipeline**
 
-```bash
-LRS_REPO_DIR=/path/to/LRS-URK ros2 launch my_drone_control planner.launch.py
-```
+1. **Find simulator checkouts.** The launch searches for the repositories and
+  prints the paths it found. Override the defaults with `LRS_REPO_DIR` and
+  `LRS_2_REPO_DIR`.
+2. **Choose an assignment.** Select `1` for indoor or `2` for outdoor. For
+  assignment `1`, answer whether to open RViz.
+3. **Start the mission node.** Assignment `1` starts `map_planner_node` with
+  the bundled map and `missions/exam_example.csv`. Assignment `2` starts
+  `outdoor_mission`, which waits for GPS readiness before requesting flight
+  mode or arming.
+4. **Start Gazebo.** Assignment `1` uses the hangar world; assignment `2` uses
+  the outdoor world. Optional RViz starts alongside the indoor planner.
+5. **Start ArduPilot SITL.** It starts 5 seconds after Gazebo.
+6. **Start MAVROS.** It starts 5 seconds after SITL.
+7. **Begin indoor control.** For assignment `1`, `takeoff_drone` starts 10
+  seconds after MAVROS. Assignment `2` is already running and proceeds when
+  its GPS and MAVROS readiness checks pass.
 
-Assignment `2` starts the outdoor Gazebo world, ArduPilot SITL, MAVROS, and
-`outdoor_mission` as managed processes in the launch terminal. Press **Ctrl+C**
-there once to stop the full stack. It checks `~/Documents/github/LRS-URK` first,
-then `~/LRS-URK`, and selects the first repository containing the required
-simulator scripts. See [A1.3](#a1-3-outdoor-mission) for its mission behavior
-and parameters. Set `LRS_2_REPO_DIR` to use a different checkout:
-
-```bash
-LRS_2_REPO_DIR=/path/to/other/LRS-URK ros2 launch my_drone_control planner.launch.py
-```
-
-Assignment `1` uses `LRS_REPO_DIR` (default `~/LRS-URK`); assignment `2` uses
-`LRS_2_REPO_DIR` or its search locations above. Both modes are managed by the
-launch process and can be stopped with **Ctrl+C** in that terminal. Both start
-a flight controller that can arm and execute a mission once MAVROS connects.
-Use the SITL simulation and verify the selected mission before running it.
+All processes are managed by the launch. Press **Ctrl+C once in the launch
+terminal** to stop the stack. See [A1.3](#a1-3-outdoor-mission) for the outdoor
+mission details.
 
 ### Manual startup
 
-Use separate terminals to inspect or control processes individually. In each
-ROS terminal, first source ROS and the workspace:
+Use separate terminals to inspect or control processes individually. The
+commands use `~/LRS-URK`; change that directory to the location of your LRS-URK
+repository if it is elsewhere. In each ROS terminal, source ROS and the
+workspace:
 
 ```bash
 source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
 ```
+
+#### Assignment 1: indoor mission
 
 Start the following processes in order:
 
@@ -566,14 +565,52 @@ Start the following processes in order:
   rviz2 -d $(ros2 pkg prefix my_drone_control)/share/my_drone_control/config/planner_view.rviz
   ```
 
-Stop each manual process with Ctrl+C in its terminal. To use another mission
-CSV, pass it to the planner:
+For a different mission CSV, pass its path to `map_planner_node`:
 
 ```bash
 ros2 run my_drone_control map_planner_node --ros-args -p mission_path:=/path/to/mission.csv
 ```
 
 The planner also accepts `map_path`, `voxel_size`, and `safety_radius` overrides.
+
+#### Assignment 2: outdoor mission
+
+Open four terminals. In each ROS terminal, source ROS and the workspace as
+shown above. Use the same LRS-URK checkout in the first three terminals.
+
+1. **Outdoor Gazebo world:**
+  ```bash
+  cd ~/LRS-URK
+  ./scripts/run_gazebo.sh fei_lrs_outdoor.world
+  ```
+2. **ArduPilot SITL:** use the home coordinates matching the outdoor world's
+  spherical coordinates:
+  ```bash
+  cd ~/LRS-URK
+  HOME_LOCATION="${HOME_LOCATION:-48.15144444,17.07375000,150,0}" \
+    ./scripts/run_sitl.sh
+  ```
+3. **MAVROS:** in another sourced terminal:
+  ```bash
+  cd ~/LRS-URK
+  ./scripts/run_mavros.sh
+  ```
+4. **Outdoor mission node:** in the fourth sourced terminal:
+  ```bash
+  ros2 run my_drone_control outdoor_mission
+  ```
+
+Start the mission node after MAVROS is publishing data. It waits for a fresh
+usable GPS fix and the configured satellite count before requesting flight
+mode or arming. Stop each manually started process with **Ctrl+C in its own
+terminal**. During flight, the abort service requests LAND:
+
+```bash
+ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
+```
+
+Read [A1.3](#a1-3-outdoor-mission) and follow the safety checklist before
+running this mission, especially before any real-drone flight.
 
 [Back to Contents](#contents)
 
