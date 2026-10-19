@@ -16,6 +16,7 @@
 #include <sensor_msgs/msg/nav_sat_fix.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <std_msgs/msg/u_int32.hpp>
+#include <std_srvs/srv/trigger.hpp>
 
 #include "my_drone_control/flight_assistant.hpp"
 
@@ -38,8 +39,13 @@ struct OutdoorMissionParams
   double hover_time = 2.0;           // [s] hold after takeoff before SQUARE
   double square_side = 5.0;          // [m]
   double square_speed = 1.0;         // [m/s] speed of the setpoint along an edge
+  double poi_east_offset = 2.5;      // [m] from launch in ENU
+  double poi_north_offset = -2.5;    // [m] from launch in ENU
+  double figure_eight_amplitude = 3.0;  // [m]
+  double figure_eight_omega = 0.25;   // [rad/s], <= 0.35 keeps peak speed <= 1.5 m/s
   double position_tolerance = 0.3;   // [m] corner reached
   double yaw_tolerance = 5.0;        // [deg] nose vs. POI bearing at a corner
+  double landing_tolerance = 0.3;    // [m] relative altitude to finish landing
 };
 
 struct Waypoint
@@ -111,7 +117,10 @@ public:
   void initializeFlightAssistant();
 
 private:
-  enum class MissionPhase { Preflight, Stabilize, Square, Hover };
+  enum class MissionPhase {
+    Preflight, Stabilize, Square, TransitToPoi, FigureEight,
+    ReturnToLaunch, Landing, Complete, SafetyStop
+  };
 
   void declareParameters();
   void createInterfaces();
@@ -122,12 +131,16 @@ private:
   void control_loop();
   void start_square();
   void square_step();
+  void trajectory_step();
   void publish_setpoint(double x, double y, double z, double yaw_deg);
+  void handle_abort(const std_srvs::srv::Trigger::Request::SharedPtr request,
+                    std_srvs::srv::Trigger::Response::SharedPtr response);
+  void enter_safety_stop(const std::string &reason);
 
   std::string phaseName() const;
   void report();
 
-  void request_mode();
+  void request_mode(const std::string &mode);
   void request_arm();
   void request_takeoff();
 
@@ -138,10 +151,18 @@ private:
   MissionPhase phase_{MissionPhase::Preflight};
   rclcpp::Time stabilize_start_;
   rclcpp::Time segment_start_time_;
+  rclcpp::Time figure_eight_start_;
+  rclcpp::Time next_mode_attempt_;
+  rclcpp::Time state_update_time_;
+  rclcpp::Time gps_update_time_;
+  rclcpp::Time satellites_update_time_;
+  rclcpp::Time pose_update_time_;
   std::vector<Waypoint> waypoints_;
   std::size_t waypoint_index_{0};
   double launch_x_{0.0};
   double launch_y_{0.0};
+  double launch_east_{0.0};
+  double launch_north_{0.0};
   double flight_z_{0.0};
   double poi_x_{0.0};
   double poi_y_{0.0};
@@ -151,6 +172,7 @@ private:
   double setpoint_y_{0.0};
   double desired_yaw_deg_{0.0};
   double yaw_error_deg_{0.0};
+  double unwrapped_figure_yaw_deg_{0.0};
 
   // Sensor data
   mavros_msgs::msg::State state_;
@@ -169,6 +191,7 @@ private:
   // Data received flags
   bool state_received_{false};
   bool gps_received_{false};
+  bool satellites_received_{false};
   bool origin_set_{false};
   bool gps_wait_started_{false};
   bool compass_received_{false};
@@ -183,6 +206,10 @@ private:
   bool armed_{false};
   bool takeoff_requested_{false};
   bool takeoff_complete_{false};
+  bool landing_mode_requested_{false};
+  bool abort_requested_{false};
+  bool flight_started_{false};
+  bool safety_stop_reported_{false};
 
   // ROS interfaces
   std::shared_ptr<FlightAssistant> assistant_;
@@ -196,10 +223,12 @@ private:
   rclcpp::Client<mavros_msgs::srv::SetMode>::SharedPtr mode_client_;
   rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arm_client_;
   rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr takeoff_client_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr abort_service_;
   rclcpp::Publisher<mavros_msgs::msg::PositionTarget>::SharedPtr setpoint_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_;
   rclcpp::TimerBase::SharedPtr report_timer_;
   rclcpp::TimerBase::SharedPtr setpoint_timer_;
+  rclcpp::TimerBase::SharedPtr trajectory_timer_;
 };
 
 }  // namespace my_drone_control

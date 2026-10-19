@@ -370,6 +370,57 @@ launch process and can be stopped with **Ctrl+C** in that terminal. Both start
 a flight controller that can arm and execute a mission once MAVROS connects.
 Use the SITL simulation and verify the selected mission before running it.
 
+### Outdoor Mission (A1.3)
+
+Assignment `2` runs the GPS-based `outdoor_mission`. Its mission is relative to
+the captured MAVROS home position (or the first usable GPS fix after the home
+timeout); it contains no fixed session coordinates. The defaults keep the
+mission within the specified field geometry:
+
+| Parameter | Default | Rationale |
+| --- | ---: | --- |
+| `target_altitude` | 5 m | Above launch; takeoff is checked with `/mavros/global_position/rel_alt`. |
+| `square_side` | 5 m | Required square size. |
+| `poi_east_offset`, `poi_north_offset` | 2.5 m, -2.5 m | Local ENU offset from launch to the square centre; tune for a different POI. |
+| `figure_eight_amplitude` | 3 m | Required Gerono figure-8 amplitude. |
+| `figure_eight_omega` | 0.25 rad/s | Conservative rate: peak speed is `A * omega * sqrt(2)`, about 1.06 m/s, and lap time is about 25.1 s. The node rejects rates that exceed 1.5 m/s peak speed. |
+| `square_speed` | 1 m/s | Traversal rate along each square edge. |
+
+All mission positions and commanded yaw setpoints use local ENU: X east, Y
+north, Z up; yaw is radians internally, with 0 east and positive
+counter-clockwise. Compass heading is degrees clockwise from magnetic north;
+the logged conversion is `yaw_ENU = wrap(90 - heading)`. The node logs pose yaw,
+compass-derived yaw, and their difference each second; verify this by rotating
+the SITL vehicle before relying on it outdoors. Compass yaw is not used to steer
+the mission; the pose yaw is used to compute heading error against the ENU
+setpoint.
+
+GPS latitude/longitude/AMSL altitude are converted to ENU using a local
+flat-Earth tangent approximation around the captured origin. It is suitable
+for this small field: curvature contributes less than a millimetre over 50 m;
+using the equatorial radius for both axes introduces about 0.2% scale error
+(roughly 0.1 m over 50 m), before GPS sensor error. AMSL is reported from
+`NavSatFix`; mission altitude is 5 m above launch, commanded as a takeoff
+altitude and checked against relative altitude; local pose Z is used for the
+local position setpoints.
+
+The mission waits for a valid GPS fix and at least `min_satellites` before
+arming. It stabilizes at altitude, continuously recomputes the POI-facing yaw
+while flying the four corners, transits to the POI before starting the
+20 Hz figure-8 timer, follows the tangent heading for one lap, returns to
+launch, and requests LAND mode. The abort service stops mission setpoints and
+requests LAND:
+
+```bash
+ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
+```
+
+If the FCU connection, fresh GPS fix, or guided mode is lost during flight, the
+node stops publishing setpoints so it does not fight the safety pilot. This
+behavior and abort path must be exercised in SITL before any real-drone flight;
+follow the course safety checklist and fly only with the instructor and safety
+pilot present.
+
 ### Manual startup
 
 Use separate terminals to inspect or control processes individually. In each
