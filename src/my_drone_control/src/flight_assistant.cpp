@@ -221,4 +221,4 @@ bool FlightAssistant::execute(const PlannedCommand &command)
   return false;
 }
 
-}  // namespace my_drone_control
+}  

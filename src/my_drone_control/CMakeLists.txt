@@ -20,6 +20,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
@@ -87,6 +88,26 @@ target_link_libraries(mission_demo_node
   "${mission_demo_cpp_typesupport_target}"
 )
 
+# -----------------------------------------------------------------------------
+# Node: outdoor_mission
+# -----------------------------------------------------------------------------
+add_executable(outdoor_mission src/outdoor_mission.cpp)
+target_link_libraries(outdoor_mission
+  flight_assistant_lib
+)
+ament_target_dependencies(outdoor_mission
+  rclcpp
+  std_msgs
+  std_srvs
+  sensor_msgs
+  geometry_msgs
+  mavros_msgs
+)
+set_target_properties(outdoor_mission PROPERTIES
+  INSTALL_RPATH "$ORIGIN"
+  BUILD_RPATH "$ORIGIN"
+)
+
 add_executable(map_planner_node src/map_planner_node.cpp)
 ament_target_dependencies(map_planner_node
   rclcpp
@@ -113,6 +134,7 @@ install(TARGETS
   takeoff_drone
   mission_demo_node
   map_planner_node
+  outdoor_mission
   DESTINATION lib/${PROJECT_NAME}
 )
 
