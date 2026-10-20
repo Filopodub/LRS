@@ -149,14 +149,14 @@ private:
 
   // Mission state
   MissionPhase phase_{MissionPhase::Preflight};
-  rclcpp::Time stabilize_start_;
-  rclcpp::Time segment_start_time_;
-  rclcpp::Time figure_eight_start_;
-  rclcpp::Time next_mode_attempt_;
-  rclcpp::Time state_update_time_;
-  rclcpp::Time gps_update_time_;
-  rclcpp::Time satellites_update_time_;
-  rclcpp::Time pose_update_time_;
+  rclcpp::Time stabilize_start_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time segment_start_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time figure_eight_start_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time next_mode_attempt_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time state_update_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time gps_update_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time satellites_update_time_{0, 0, RCL_ROS_TIME};
+  rclcpp::Time pose_update_time_{0, 0, RCL_ROS_TIME};
   std::vector<Waypoint> waypoints_;
   std::size_t waypoint_index_{0};
   double launch_x_{0.0};
@@ -186,7 +186,7 @@ private:
   double origin_lat_{0.0};
   double origin_lon_{0.0};
   double origin_alt_{0.0};
-  rclcpp::Time gps_wait_start_;
+  rclcpp::Time gps_wait_start_{0, 0, RCL_ROS_TIME};
 
   // Data received flags
   bool state_received_{false};

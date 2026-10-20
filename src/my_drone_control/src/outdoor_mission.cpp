@@ -30,19 +30,13 @@ void OutdoorMission::declareParameters()
   p.square_speed = declare_parameter<double>("square_speed", p.square_speed);
   p.poi_east_offset = declare_parameter<double>("poi_east_offset", p.poi_east_offset);
   p.poi_north_offset = declare_parameter<double>("poi_north_offset", p.poi_north_offset);
-  p.figure_eight_amplitude = declare_parameter<double>(
-    "figure_eight_amplitude", p.figure_eight_amplitude);
+  p.figure_eight_amplitude = declare_parameter<double>("figure_eight_amplitude", p.figure_eight_amplitude);
   p.figure_eight_omega = declare_parameter<double>("figure_eight_omega", p.figure_eight_omega);
   p.position_tolerance = declare_parameter<double>("position_tolerance", p.position_tolerance);
   p.yaw_tolerance = declare_parameter<double>("yaw_tolerance", p.yaw_tolerance);
   p.landing_tolerance = declare_parameter<double>("landing_tolerance", p.landing_tolerance);
 
-  if (p.target_altitude <= 0.0 || p.altitude_tolerance <= 0.0 || p.min_satellites < 0 ||
-    p.home_timeout <= 0.0 || p.hover_time < 0.0 || p.square_side <= 0.0 ||
-    p.square_speed <= 0.0 || p.figure_eight_amplitude <= 0.0 ||
-    p.figure_eight_omega <= 0.0 ||
-    p.figure_eight_amplitude * p.figure_eight_omega * std::sqrt(2.0) > 1.5 ||
-    p.position_tolerance <= 0.0 || p.yaw_tolerance <= 0.0 || p.landing_tolerance <= 0.0)
+  if (p.target_altitude <= 0.0 || p.altitude_tolerance <= 0.0 || p.min_satellites < 0 ||p.home_timeout <= 0.0 || p.hover_time < 0.0 || p.square_side <= 0.0 ||p.square_speed <= 0.0 || p.figure_eight_amplitude <= 0.0 ||p.figure_eight_omega <= 0.0 ||p.figure_eight_amplitude * p.figure_eight_omega * std::sqrt(2.0) > 1.5 ||p.position_tolerance <= 0.0 || p.yaw_tolerance <= 0.0 || p.landing_tolerance <= 0.0)
   {
     throw std::invalid_argument(
       "invalid outdoor mission parameters; omega must be in (0, 0.35] rad/s");
@@ -51,45 +45,33 @@ void OutdoorMission::declareParameters()
 
 void OutdoorMission::createInterfaces()
 {
-  state_sub_ = create_subscription<mavros_msgs::msg::State>(
-    "mavros/state", 10,
-    [this](const mavros_msgs::msg::State::SharedPtr message) {
+  state_sub_ = create_subscription<mavros_msgs::msg::State>("mavros/state", 10,[this](const mavros_msgs::msg::State::SharedPtr message) {
       state_ = *message;
       state_received_ = true;
       state_update_time_ = now();
     });
-  gps_sub_ = create_subscription<sensor_msgs::msg::NavSatFix>(
-    "mavros/global_position/global", rclcpp::SensorDataQoS(),
-    [this](const sensor_msgs::msg::NavSatFix::SharedPtr message) {
+  gps_sub_ = create_subscription<sensor_msgs::msg::NavSatFix>("mavros/global_position/global", rclcpp::SensorDataQoS(),[this](const sensor_msgs::msg::NavSatFix::SharedPtr message) {
       gps_ = *message;
       gps_received_ = true;
       gps_update_time_ = now();
     });
-  satellites_sub_ = create_subscription<std_msgs::msg::UInt32>(
-    "mavros/global_position/raw/satellites", rclcpp::SensorDataQoS(),
-    [this](const std_msgs::msg::UInt32::SharedPtr message) {
+  satellites_sub_ = create_subscription<std_msgs::msg::UInt32>("mavros/global_position/raw/satellites", rclcpp::SensorDataQoS(),[this](const std_msgs::msg::UInt32::SharedPtr message) {
       satellites_ = message->data;
       satellites_received_ = true;
       satellites_update_time_ = now();
     });
-  home_sub_ = create_subscription<mavros_msgs::msg::HomePosition>(
-    "mavros/home_position/home", rclcpp::SensorDataQoS(),
-    [this](const mavros_msgs::msg::HomePosition::SharedPtr message) {
+  home_sub_ = create_subscription<mavros_msgs::msg::HomePosition>("mavros/home_position/home", rclcpp::SensorDataQoS(),[this](const mavros_msgs::msg::HomePosition::SharedPtr message) {
       if (origin_set_) {
         return;
       }
       setOrigin(message->geo.latitude, message->geo.longitude, message->geo.altitude,
                 "home position");
     });
-  compass_sub_ = create_subscription<std_msgs::msg::Float64>(
-    "mavros/global_position/compass_hdg", rclcpp::SensorDataQoS(),
-    [this](const std_msgs::msg::Float64::SharedPtr message) {
+  compass_sub_ = create_subscription<std_msgs::msg::Float64>("mavros/global_position/compass_hdg", rclcpp::SensorDataQoS(),[this](const std_msgs::msg::Float64::SharedPtr message) {
       compass_heading_deg_ = message->data;
       compass_received_ = true;
     });
-  altitude_sub_ = create_subscription<std_msgs::msg::Float64>(
-    "mavros/global_position/rel_alt", rclcpp::SensorDataQoS(),
-    [this](const std_msgs::msg::Float64::SharedPtr message) {
+  altitude_sub_ = create_subscription<std_msgs::msg::Float64>("mavros/global_position/rel_alt", rclcpp::SensorDataQoS(),[this](const std_msgs::msg::Float64::SharedPtr message) {
       relative_altitude_ = message->data;
       altitude_received_ = true;
     });
@@ -97,12 +79,8 @@ void OutdoorMission::createInterfaces()
   mode_client_ = create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
   arm_client_ = create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
   takeoff_client_ = create_client<mavros_msgs::srv::CommandTOL>("mavros/cmd/takeoff");
-  abort_service_ = create_service<std_srvs::srv::Trigger>(
-    "~/abort",
-    std::bind(&OutdoorMission::handle_abort, this, std::placeholders::_1, std::placeholders::_2));
-  setpoint_pub_ = create_publisher<mavros_msgs::msg::PositionTarget>(
-    "mavros/setpoint_raw/local", 10);
-
+  abort_service_ = create_service<std_srvs::srv::Trigger>("~/abort",std::bind(&OutdoorMission::handle_abort, this, std::placeholders::_1, std::placeholders::_2));
+  setpoint_pub_ = create_publisher<mavros_msgs::msg::PositionTarget>("mavros/setpoint_raw/local", 10);
   control_timer_ = create_wall_timer(100ms, [this]() { control_loop(); });
   report_timer_ = create_wall_timer(1s, [this]() { report(); });
   setpoint_timer_ = create_wall_timer(50ms, [this]() { trajectory_step(); });
@@ -112,9 +90,7 @@ void OutdoorMission::initializeFlightAssistant()
 {
   assistant_ = std::make_shared<FlightAssistant>("map");
   assistant_->attachNode(shared_from_this());
-  pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-    "mavros/local_position/pose", rclcpp::SensorDataQoS(),
-    [this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
+  pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>("mavros/local_position/pose", rclcpp::SensorDataQoS(),[this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
       assistant_->updateLocalPose(*message);
       local_pose_ = *message;
       pose_received_ = true;
@@ -320,13 +296,11 @@ void OutdoorMission::square_step()
   const double dy = target.y - segment_start_y_;
   const double length = std::hypot(dx, dy);
   const double elapsed = (now() - segment_start_time_).seconds();
-  const double progress =
-    length < 1e-3 ? 1.0 : std::min(1.0, params_.square_speed * elapsed / length);
+  const double progress = length < 1e-3 ? 1.0 : std::min(1.0, params_.square_speed * elapsed / length);
 
   setpoint_x_ = segment_start_x_ + dx * progress;
   setpoint_y_ = segment_start_y_ + dy * progress;
 
-  // Bearing from the actual position to the POI, recomputed every cycle (ENU)
   desired_yaw_deg_ = std::atan2(poi_y_ - y, poi_x_ - x) * 180.0 / kPi;
   yaw_error_deg_ = wrapDeg(yawFromQuaternionDeg(local_pose_.pose.orientation) - desired_yaw_deg_);
 
@@ -647,7 +621,7 @@ int main(int argc, char ** argv)
   try {
     auto node = std::make_shared<my_drone_control::OutdoorMission>();
     node->initializeFlightAssistant();
-    rclcpp::spin(node);
+    rclcpp::spin( );
   } catch (const std::exception & e) {
     RCLCPP_ERROR(rclcpp::get_logger("outdoor_mission"), "%s", e.what());
   }
