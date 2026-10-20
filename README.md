@@ -2,6 +2,8 @@
 
 A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle inflation, spatial occupancy querying, mission CSV waypoint parsing, 3D A* path planning, and line-of-sight path post-processing for autonomous drone navigation in hangar environments.
 
+Authors: Bc. Samuel Kopp, Bc. Filip Dubovsky
+
 ## Contents
 
 - [A1.1 — Map processing and path planning](#a1-1-map-processing)
