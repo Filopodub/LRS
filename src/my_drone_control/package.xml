@@ -14,6 +14,9 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rviz2</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-matplotlib</exec_depend>
+  <exec_depend>localization_sensor_sim</exec_depend>
 
   <depend>rclcpp</depend>
   <depend>std_msgs</depend>

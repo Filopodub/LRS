@@ -7,6 +7,7 @@ A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle 
 - [A1.1 — Map processing and path planning](#a1-1-map-processing)
 - [A1.2 — Mission execution, indoor flight](#a1-2-mission-execution)
 - [A1.3 — Outdoor GPS mission](#a1-3-outdoor-mission)
+- [Assignment 2 — Localization plots](#assignment-2-localization-plots)
 - [Prerequisites and build](#prerequisites-and-build)
 - [How to run](#how-to-run)
 - [ROS 2 interface](#ros-2-interface)
@@ -36,6 +37,83 @@ The CSV (`x,y,z,precision,task`) contains ordered goal waypoints, not a path. A 
 Greedy line-of-sight shortcutting replaces a path section with the furthest later voxel visible through the inflated grid. The example reduced **172 points to 24 (86%)** in about **2.56 s** on this machine. Segments are checked using rounded samples, which is fast but not exact voxel traversal; a collision between samples can be missed, so this is not a formal continuous collision guarantee.
 
 ![Simplified route over the inflated map](readme_data/final_path.png)
+
+[Back to Contents](#contents)
+
+<a id="assignment-2-localization-plots"></a>
+## Assignment 2 — Localization plots
+
+The localization plot tool is separate from the estimator and controllers. It
+subscribes to GPS, VO, IMU, and evaluation ground truth for visualization only;
+it does not publish control or estimator feedback. Its terminal report includes
+simulation-stamp and wall-clock rates, frame IDs, sensor freshness transitions,
+GPS/VO position residuals against truth, and a rolling gyro-Z mean and standard
+deviation. The live plots show the XY track, ENU X/Y/Z, VO/truth yaw, and gyro Z
+alongside the truth yaw rate. A 120-second sliding window covers startup,
+the complete square, and landing. Plot x-axes use sensor simulation time;
+the plotter detects and corrects backward clock resets so the run remains
+continuous. The plot title shows elapsed simulation time and whether each
+stream is live; stream-health checks use wall time so a paused Gazebo clock
+does not freeze the terminal diagnostics.
+
+Build the workspace package and the supplied sensor simulator package. The
+sensor package is in the separate `LRS-URK` checkout:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --base-paths src "$HOME/LRS-URK/localization_sensor_sim" \
+  --packages-select my_drone_control localization_sensor_sim
+source install/setup.bash
+```
+
+Start the full sensor/vehicle stack and plots with one launch command:
+
+```bash
+ros2 launch my_drone_control localization_plots.launch.py \
+  repo_dir:="$HOME/LRS-URK" seed:=42
+```
+
+The launch starts the seeded Gazebo world, SITL, MAVROS, sensor bridge and
+corruption node, and the plotter. It does **not** start a mission or arm the
+drone. Press Ctrl+C in the launch terminal to stop all processes. Use the same
+seed for Gazebo and the sensor simulator; change `repo_dir` if the LRS-URK
+checkout is elsewhere. The plotter compares the VO track with truth as
+published; VO is in `vo_odom`, so treat its residual as an alignment/drift
+diagnostic, not as a substitute for a frame transform in the estimator.
+
+To move the simulated drone through one small square while collecting plots,
+explicitly enable the optional setpoint-only mission:
+
+```bash
+ros2 launch my_drone_control localization_plots.launch.py \
+  repo_dir:="$HOME/LRS-URK" seed:=42 run_square:=true
+```
+
+The plotter starts with the launch, before Gazebo and the mission, so it can
+capture the whole flight regardless of SITL startup duration or simulation
+speed.
+
+This arms SITL, requests takeoff to 1.5 m through `/mavros/cmd/takeoff`, then
+commands one 2 m square at a nominal 0.5 m/s from the localization world's
+initial ENU position `(-7, 13)`, returns to that start setpoint, and requests
+LAND. It uses the same `/mavros/setpoint_position/local` `PoseStamped`
+interface as the working Assignment 1 controller. `/mavros/state` is used
+only for connection/mode/arming status; the mission does not use MAVROS pose
+feedback, GPS, or ground truth. This setpoint-only mission is for sensor
+characterization in the supplied SITL world, not the final Assignment 2
+controller. Verify the Gazebo scene and keep a safety pilot ready before
+enabling it. Set `run_square:=false` (the default) for stationary
+characterization. The mission does not publish position setpoints until the
+takeoff command has been accepted and its 12-second hold has elapsed. If SITL
+disarms during that interval, the mission stops and logs an error instead of
+continuing the square; command acceptance alone is not treated as proof of
+climb. After MAVROS connects, it waits 20 seconds for SITL/EKF startup before
+requesting GUIDED and arming. Expect roughly 80 seconds from launch through
+landing. Leave the launch running until it logs `Vehicle disarmed; square
+mission complete`; Ctrl+C during a leg stops the mission before its LAND phase.
+Gazebo and SITL build output are routed to ROS launch log files to keep the
+terminal focused on MAVROS status, sensor readiness, and mission progress.
 
 [Back to Contents](#contents)
 

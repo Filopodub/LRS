@@ -108,6 +108,13 @@ set_target_properties(outdoor_mission PROPERTIES
   BUILD_RPATH "$ORIGIN"
 )
 
+add_executable(localization_square_mission src/localization_square_mission.cpp)
+ament_target_dependencies(localization_square_mission
+  rclcpp
+  mavros_msgs
+  geometry_msgs
+)
+
 add_executable(map_planner_node src/map_planner_node.cpp)
 ament_target_dependencies(map_planner_node
   rclcpp
@@ -135,6 +142,12 @@ install(TARGETS
   mission_demo_node
   map_planner_node
   outdoor_mission
+  localization_square_mission
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+install(PROGRAMS
+  scripts/localization_plotter.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
