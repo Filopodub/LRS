@@ -1,0 +1,10 @@
+# Defense mission 1,,,,,
+# x,y,z,precision,task -- map frame (maps/FEI_LRS_PCD/map.pcd),metres and degrees.
+x,y,z,precision,task,
+13.00,7.00,1.00,soft,takeoff,
+1.90,8.90,2.50,soft,-,
+1.90,4.60,2.50,hard,yaw180,
+6.80,4.80,1.50,soft,-,
+6.80,8.80,1.50,hard,landtakeoff,
+16.60,1.30,0.80,soft,-,
+14.00,9.50,1.50,hard,land,

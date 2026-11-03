@@ -54,7 +54,8 @@ public:
   MapPlannerNode() : Node("map_planner_node") {
     // ROS Parameters
     this->declare_parameter<std::string>("map_path", "/home/user/ros2_ws/src/my_drone_control/maps/map.pcd");
-    this->declare_parameter<std::string>("mission_path", "/home/user/ros2_ws/src/my_drone_control/missions/exam_example.csv");
+    // this->declare_parameter<std::string>("mission_path", "/home/user/ros2_ws/src/my_drone_control/missions/exam_example.csv");
+    this->declare_parameter<std::string>("mission_path", "/home/user/ros2_ws/src/my_drone_control/missions/defense_mission_1.csv");
     this->declare_parameter<double>("voxel_size", 0.25);
     this->declare_parameter<double>("safety_radius", 0.60);
 
