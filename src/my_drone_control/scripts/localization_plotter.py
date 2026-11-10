@@ -319,9 +319,15 @@ class LocalizationPlotter(Node):
             self.get_logger().error(f'Diagnostics reporting error: {e}')
 
     def show_plots(self):
-        figure, axes = plt.subplots(3, 2, figsize=(14, 9), constrained_layout=True)
-        axes = axes.flatten()
-        ax_xy, ax_x, ax_y, ax_z, ax_yaw, ax_gyro = axes
+        figure = plt.figure(figsize=(16, 9), constrained_layout=True)
+        layout = figure.add_gridspec(3, 3)
+        ax_xy = figure.add_subplot(layout[:, 0])
+        ax_x = figure.add_subplot(layout[0, 1])
+        ax_y = figure.add_subplot(layout[0, 2])
+        ax_z = figure.add_subplot(layout[1, 1])
+        ax_yaw = figure.add_subplot(layout[1, 2])
+        ax_gyro = figure.add_subplot(layout[2, 1:])
+        axes = [ax_xy, ax_x, ax_y, ax_z, ax_yaw, ax_gyro]
         lines = {}
 
         # --- Horizontal track (XY) ---
