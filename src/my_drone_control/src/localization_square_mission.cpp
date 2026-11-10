@@ -4,6 +4,7 @@
 #include <mavros_msgs/srv/command_tol.hpp>
 #include <mavros_msgs/srv/set_mode.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 
 #include <array>
 #include <cmath>
@@ -52,16 +53,23 @@ public:
     arm_client_ = create_client<mavros_msgs::srv::CommandBool>("/mavros/cmd/arming");
     takeoff_client_ = create_client<mavros_msgs::srv::CommandTOL>("/mavros/cmd/takeoff");
 
+    ekf_subscription_ = create_subscription<nav_msgs::msg::Odometry>(
+      "/localization/ekf", 10,
+      [this](const nav_msgs::msg::Odometry::SharedPtr message) {
+        ekf_odom_ = *message;
+        ekf_received_ = true;
+      });
+
     phase_started_ = now();
     next_request_time_ = now();
     timer_ = create_wall_timer(
       std::chrono::milliseconds(50), [this]() { tick(); });
 
-    RCLCPP_WARN(
+    RCLCPP_INFO(
       get_logger(),
-      "SITL characterization mission enabled: square relative to MAVROS local origin "
+      "SITL characterization mission enabled: square relative to origin "
       "(%.1f, %.1f), altitude %.1f m, side %.1f m, %d lap(s). "
-      "No MAVROS position feedback is used.",
+      "Consuming EKF estimates from /localization/ekf.",
       start_x_, start_y_, altitude_, square_size_, laps_);
   }
 
@@ -144,6 +152,16 @@ private:
           return;
         }
         publish_setpoint(target_for_current_phase());
+        if (ekf_received_ && (now() - last_ekf_log_).seconds() >= 2.0) {
+          last_ekf_log_ = now();
+          const auto &p = ekf_odom_.pose.pose.position;
+          auto tgt = target_for_current_phase();
+          double dist = std::hypot(p.x - tgt[0], p.y - tgt[1]);
+          RCLCPP_INFO(
+            get_logger(),
+            "[EKF Feedback] est=(%.2f, %.2f, %.2f) m | target=(%.2f, %.2f, %.2f) m | horiz_err=%.2f m",
+            p.x, p.y, p.z, tgt[0], tgt[1], tgt[2], dist);
+        }
         if ((now() - phase_started_).seconds() >= leg_duration_s()) {
           ++leg_index_;
           if (leg_index_ >= static_cast<std::size_t>(4 * laps_)) {
@@ -314,6 +332,10 @@ private:
   rclcpp::Client<mavros_msgs::srv::SetMode>::SharedPtr mode_client_;
   rclcpp::Client<mavros_msgs::srv::CommandBool>::SharedPtr arm_client_;
   rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedPtr takeoff_client_;
+  rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr ekf_subscription_;
+  bool ekf_received_{false};
+  nav_msgs::msg::Odometry ekf_odom_;
+  rclcpp::Time last_ekf_log_{0, 0, RCL_ROS_TIME};
   rclcpp::TimerBase::SharedPtr timer_;
 };
 

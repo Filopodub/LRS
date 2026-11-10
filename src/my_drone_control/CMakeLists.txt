@@ -113,6 +113,7 @@ ament_target_dependencies(localization_square_mission
   rclcpp
   mavros_msgs
   geometry_msgs
+  nav_msgs
 )
 
 add_executable(map_planner_node src/map_planner_node.cpp)
@@ -148,6 +149,7 @@ install(TARGETS
 
 install(PROGRAMS
   scripts/localization_plotter.py
+  scripts/ekf_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

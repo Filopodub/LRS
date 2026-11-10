@@ -8,6 +8,7 @@ A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle 
 - [A1.2 — Mission execution, indoor flight](#a1-2-mission-execution)
 - [A1.3 — Outdoor GPS mission](#a1-3-outdoor-mission)
 - [Assignment 2 — Localization plots](#assignment-2-localization-plots)
+- [Assignment 2.2 — Eight-state Extended Kalman Filter (EKF)](#assignment-2-2-ekf)
 - [Prerequisites and build](#prerequisites-and-build)
 - [How to run](#how-to-run)
 - [ROS 2 interface](#ros-2-interface)
@@ -114,6 +115,109 @@ landing. Leave the launch running until it logs `Vehicle disarmed; square
 mission complete`; Ctrl+C during a leg stops the mission before its LAND phase.
 Gazebo and SITL build output are routed to ROS launch log files to keep the
 terminal focused on MAVROS status, sensor readiness, and mission progress.
+
+[Back to Contents](#contents)
+
+---
+
+<a id="assignment-2-2-ekf"></a>
+## Assignment 2.2 — Eight-state Extended Kalman Filter (EKF)
+
+The EKF implementation runs in its own independent node (`ekf_node.py`), fusing high-rate IMU data for prediction with asynchronous GPS and Visual Odometry (VO) measurements for correction.
+
+### 1. State vector and frame conventions
+
+The filter estimates the mandatory 8-state vector in the world ENU `map` frame:
+
+$$\mathbf{x} = [x, y, z, v_x, v_y, v_z, \psi, b]^T$$
+
+- Position: $\mathbf{p} = [x, y, z]^T$ in meters (`map` frame).
+- Velocity: $\mathbf{v} = [v_x, v_y, v_z]^T$ in m/s (`map` frame).
+- Yaw: $\psi$ in radians, counter-clockwise from East, wrapped strictly to $[-\pi, \pi)$.
+- Gyro bias: $b$ in rad/s, representing the IMU angular rate Z bias.
+
+Published outputs:
+- **Topic**: `/localization/ekf` as `nav_msgs/msg/Odometry` (`frame_id='map'`, `child_frame_id='base_link'`).
+- **Pose topic**: `/localization/ekf_pose` as `geometry_msgs/msg/PoseStamped` (`frame_id='map'`).
+- **Covariance**: Full 6×6 pose covariance ($x, y, z, \text{roll}, \text{pitch}, \text{yaw}$) and twist covariance ($v_x, v_y, v_z$).
+- **Controller consumption**: `localization_square_mission` subscribes directly to `/localization/ekf` to monitor horizontal position tracking error against leg waypoints during flight.
+
+### 2. Prediction model (IMU-driven constant velocity)
+
+On every IMU message (100 Hz), the elapsed time $\Delta t$ is computed from message header stamps. The state propagates forward via:
+
+$$\begin{aligned}
+\mathbf{p}_k &= \mathbf{p}_{k-1} + \mathbf{v}_{k-1} \Delta t \\
+\mathbf{v}_k &= \mathbf{v}_{k-1} + \mathbf{w}_v \\
+\psi_k &= \text{wrap}\left(\psi_{k-1} + (\omega_{z, \text{meas}} - b_{k-1}) \Delta t\right) \\
+b_k &= b_{k-1} + w_b
+\end{aligned}$$
+
+The state transition Jacobian $\mathbf{F} = \frac{\partial \mathbf{f}}{\partial \mathbf{x}}$ is an $8 \times 8$ identity matrix with the following off-diagonal elements:
+- $\mathbf{F}_{0,3} = \mathbf{F}_{1,4} = \mathbf{F}_{2,5} = \Delta t$ (position derivative w.r.t velocity)
+- $\mathbf{F}_{6,7} = -\Delta t$ (yaw derivative w.r.t gyro bias: $\frac{\partial \psi_k}{\partial b_{k-1}} = -\Delta t$)
+
+Covariance prediction:
+$$\mathbf{P}_k = \mathbf{F} \mathbf{P}_{k-1} \mathbf{F}^T + \mathbf{Q} \Delta t$$
+
+where $\mathbf{Q} = \text{diag}(q_{\text{pos}}, q_{\text{pos}}, q_{\text{pos}}, q_{\text{vel}}, q_{\text{vel}}, q_{\text{vel}}, q_{\text{yaw}}, q_{\text{bias}})$.
+
+### 3. Asynchronous measurement updates
+
+Measurement updates are applied strictly asynchronously as sensor messages arrive, without waiting for time synchronisation across sensors. Duplicate and out-of-order timestamps ($t \le t_{\text{last}}$) and simulation clock jumps ($t < t_{\text{last}} - 0.5$) are rejected or handled gracefully.
+
+1. **GPS position correction (5 Hz)**:
+   - Measures absolute position $\mathbf{z}_{\text{gps}} = [x_{\text{gps}}, y_{\text{gps}}, z_{\text{gps}}]^T$ in `map` frame.
+   - Measurement matrix $\mathbf{H}_{\text{gps}}$ selects state indices 0, 1, 2.
+   - GPS position noise is zero-mean white noise with $\sigma = [0.6, 0.6, 0.9]\,\text{m}$. Fusing GPS eliminates long-term drift.
+   - Measurement covariance $\mathbf{R}_{\text{gps}}$ is loaded dynamically from the message covariance array.
+
+2. **VO yaw correction (30 Hz)**:
+   - Measures heading $\psi_{\text{vo}}$.
+   - Measurement matrix $\mathbf{H}_{\text{yaw}} = [0, 0, 0, 0, 0, 0, 1, 0]$.
+   - Innovation is explicitly wrapped: $\tilde{y} = \text{wrap}(\psi_{\text{vo}} - \hat{\psi})$.
+
+3. **VO body velocity correction (30 Hz, Nonlinear EKF)**:
+   - VO provides linear velocity in the body frame: $\mathbf{z}_{\text{vel}} = [v_{b,x}, v_{b,y}, v_{b,z}]^T$.
+   - The genuine nonlinear measurement model maps world velocity and estimated yaw to body frame:
+     $$h(\mathbf{x}) = \mathbf{R}(\psi)^T \mathbf{v}_{\text{world}} = \begin{bmatrix} \cos(\psi) v_x + \sin(\psi) v_y \\ -\sin(\psi) v_x + \cos(\psi) v_y \\ v_z \end{bmatrix}$$
+   - Analytical measurement Jacobian $\mathbf{H}_{\text{vel}} = \frac{\partial h}{\partial \mathbf{x}}$ ($3 \times 8$ matrix):
+     $$\mathbf{H}_{\text{vel}} = \begin{bmatrix}
+     0 & 0 & 0 & \cos\psi & \sin\psi & 0 & -\sin(\psi) v_x + \cos(\psi) v_y & 0 \\
+     0 & 0 & 0 & -\sin\psi & \cos\psi & 0 & -\cos(\psi) v_x - \sin(\psi) v_y & 0 \\
+     0 & 0 & 0 & 0 & 0 & 1 & 0 & 0
+     \end{bmatrix}$$
+   - Fusing body velocity provides high-rate velocity damping and dead-reckoning during GPS noise or outages without inheriting VO position drift.
+
+### 4. Gyro bias observability
+
+The gyro bias $b$ is not directly measured by any sensor, but becomes fully observable through the coupling between yaw prediction and VO yaw measurement updates:
+
+1. In the prediction step, $\mathbf{F}_{6,7} = -\Delta t$. Propagating $\mathbf{P} \leftarrow \mathbf{F} \mathbf{P} \mathbf{F}^T$ develops an off-diagonal cross-covariance between yaw and bias:
+   $$\mathbf{P}_{\psi, b} \approx \mathbf{P}_{\psi, b}^{\text{prior}} - \Delta t \cdot \mathbf{P}_{b, b}$$
+   Because the bias variance $\mathbf{P}_{b, b} > 0$, a non-zero correlation builds up whenever gyro measurements are integrated.
+2. When a VO yaw measurement arrives ($\mathbf{H}_{\text{yaw}} = [0, 0, 0, 0, 0, 0, 1, 0]$), the Kalman gain component for gyro bias is:
+   $$\mathbf{K}_b = \frac{\mathbf{P}_{b, \psi}}{\mathbf{P}_{\psi, \psi} + R_{\text{yaw}}}$$
+3. Because $\mathbf{P}_{b, \psi} \neq 0$, any persistent residual between the integrated gyro yaw and VO yaw directly drives the gyro bias correction:
+   $$\hat{b} \leftarrow \hat{b} + \mathbf{K}_b \cdot \text{wrap}(\psi_{\text{vo}} - \hat{\psi})$$
+   This makes the unknown gyro bias observable and continually estimated.
+
+### 5. Deliberate initialization
+
+The estimator deliberately waits for the first valid GPS position and the first VO yaw before launching the filter:
+- $\hat{\mathbf{p}}_0 = \mathbf{p}_{\text{first GPS}}$
+- $\hat{\mathbf{v}}_0 = [0, 0, 0]^T$ with initial variance $1.0\,\text{m}^2/\text{s}^2$
+- $\hat{\psi}_0 = \psi_{\text{first VO}}$ with initial variance $(\pi/4)^2\,\text{rad}^2$
+- $\hat{b}_0 = 0\,\text{rad/s}$ with initial variance $(0.1)^2\,(\text{rad/s})^2$
+- Ground truth (`/evaluation/ground_truth`) is strictly forbidden and never accessed by the estimator.
+
+### 6. Plotter integration
+
+The `localization_plotter.py` node:
+- Subscribes to `/localization/ekf` (`Odometry`).
+- Computes and renders the dynamic **2-$\sigma$ horizontal covariance ellipse** centered on the estimated $(x, y)$ position on the **Horizontal track** subplot.
+- Overlays the EKF state tracks in red across **all 6 subplots** (Horizontal track, X, Y, Altitude, Yaw, and Yaw rate).
+- Displays EKF stream health, sim-time progress, and RMS position error vs ground truth in the live diagnostics summary.
 
 [Back to Contents](#contents)
 

@@ -64,6 +64,13 @@ def generate_launch_description():
         output='screen',
         parameters=[{'use_sim_time': True, 'window_s': 120.0}],
     )
+    ekf_node = Node(
+        package='my_drone_control',
+        executable='ekf_node.py',
+        name='ekf_node',
+        output='screen',
+        parameters=[{'use_sim_time': True}],
+    )
     square_mission = Node(
         package='my_drone_control',
         executable='localization_square_mission',
@@ -110,6 +117,7 @@ def generate_launch_description():
             description='Arm SITL and fly the optional localization characterization square',
         ),
         plotter,
+        ekf_node,
         start_sensors_and_sitl,
         start_mavros,
         start_square_after_mavros,
