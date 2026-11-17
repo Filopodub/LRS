@@ -1,44 +1,62 @@
 #!/usr/bin/env bash
+# Assignment 2 start script: localization world, SITL, MAVROS, sensor simulation,
+# EKF, plotter and the square + figure-8 mission flown on the EKF estimate.
+# Keys in this terminal: 'e' = toggle GPS (simulated outage), 'o' = inject GPS outlier,
+# 'q' = quit the key loop.
 
 set -e
 
 REPO_DIR="${REPO_DIR:-$HOME/Documents/github/LRS-URK}"
 ROS2_WS="${ROS2_WS:-$HOME/ros2_ws}"
+SEED="${SEED:-42}"
 ROS_SETUP="/opt/ros/jazzy/setup.bash"
 WS_SETUP="$ROS2_WS/install/setup.bash"
 
-# Outdoor world + matching SITL home (must equal <spherical_coordinates> in the world file)
-WORLD="fei_lrs_outdoor.world"
-HOME_LOCATION="${HOME_LOCATION:-48.15144444,17.07375000,150,0}"
-
-if [ ! -f "$ROS_SETUP" ]; then
-  echo "ROS2 setup file not found: $ROS_SETUP"
+for f in "$ROS_SETUP" "$WS_SETUP"; do
+  if [ ! -f "$f" ]; then
+    echo "Setup file not found: $f (build the workspace first)"
+    exit 1
+  fi
+done
+if [ ! -d "$REPO_DIR" ]; then
+  echo "LRS-URK checkout not found: $REPO_DIR (set REPO_DIR=...)"
   exit 1
 fi
 
-if [ -f "$WS_SETUP" ]; then
-  source "$WS_SETUP"
-fi
+source "$ROS_SETUP"
+source "$WS_SETUP"
 
-declare -a COMMANDS=(
-  "./scripts/run_gazebo.sh $WORLD"
-  "HOME_LOCATION='$HOME_LOCATION' ./scripts/run_sitl.sh"
-  "./scripts/run_mavros.sh"
-)
+# One launch starts Gazebo, SITL, MAVROS, sensors, EKF, plotter and the mission.
+gnome-terminal --title="Assignment 2 stack" \
+  -- bash -ic "source '$ROS_SETUP'; source '$WS_SETUP'; cd '$ROS2_WS'; \
+ros2 launch my_drone_control localization_plots.launch.py \
+repo_dir:='$REPO_DIR' seed:=$SEED run_mission:=true; exec bash"
 
-for cmd in "${COMMANDS[@]}"; do
-  script="${cmd##*./scripts/}"
-  script="${script%% *}"
-  if [ -f "$REPO_DIR/scripts/$script" ]; then
-    gnome-terminal --working-directory="$REPO_DIR" \
-      -- bash -ic "source '$ROS_SETUP'; source '$WS_SETUP'; cd '$REPO_DIR'; $cmd; exec bash"
-  else
-    gnome-terminal --working-directory="$REPO_DIR" \
-      -- bash -ic "source '$ROS_SETUP'; source '$WS_SETUP'; cd '$REPO_DIR'; echo 'Missing script: $script'; exec bash"
-  fi
+# ---------------------------------------------------------------------------
+# Keyboard control of the sensor simulation
+# ---------------------------------------------------------------------------
+gps_enabled=true
+echo "Keys: 'e' = disable/enable GPS, 'o' = inject one GPS outlier, 'q' = quit."
+while IFS= read -rsn1 key; do
+  case "$key" in
+    e|E)
+      if $gps_enabled; then want=false; else want=true; fi
+      if ros2 service call /localization/set_gps_enabled std_srvs/srv/SetBool \
+        "{data: $want}" >/dev/null 2>&1; then
+        gps_enabled=$want
+        echo "[$(date +%T)] GPS enabled -> $gps_enabled"
+      else
+        echo "  service call failed (is localization_sensor_sim running yet?)"
+      fi
+      ;;
+    o|O)
+      if ros2 service call /localization/inject_gps_outlier std_srvs/srv/Trigger "{}" \
+        >/dev/null 2>&1; then
+        echo "[$(date +%T)] GPS outlier injected"
+      else
+        echo "  service call failed (is localization_sensor_sim running yet?)"
+      fi
+      ;;
+    q|Q) break ;;
+  esac
 done
-
-sleep 5
-
-gnome-terminal \
-  -- bash -ic "source '$ROS_SETUP'; source '$WS_SETUP'; cd '$ROS2_WS'; ros2 run my_drone_control outdoor_mission; exec bash"

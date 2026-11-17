@@ -232,8 +232,9 @@ The `localization_plotter.py` node:
   (`gps_timeout_s` = 1.0, `vo_timeout_s` = 0.5, `imu_timeout_s` = 0.2), never at sensor rate.
 - Duplicate or out-of-order stamps ($t \le t_{\text{last}}$) are dropped. The Kalman gain is
   computed with `np.linalg.solve` rather than an explicit inverse.
-- **Manual GPS outage**: in the terminal running `lrs.sh`, press `e` to disable GPS and `e` again
-  to re-enable it (calls `/localization/set_gps_enabled`). Press `q` to leave the key loop.
+- **Manual tests**: in the terminal running `2lrs.sh` (see §9), press `e` to disable GPS and `e`
+  again to re-enable it (`/localization/set_gps_enabled`), or `o` to inject one GPS outlier
+  (`/localization/inject_gps_outlier`).
 
 ### 8. Flight using estimated localisation (Assignment 2.4)
 
@@ -256,6 +257,29 @@ ros2 launch my_drone_control localization_plots.launch.py \
 
 Mission parameters for this run: 2 m altitude, 4 m square at 0.5 m/s, then one figure-8
 (A = 2 m, ω = 0.2 rad/s) centred at (+2, −2) m from the origin, return and LAND.
+
+### 9. Start script (`2lrs.sh`)
+
+`2lrs.sh` starts the whole Assignment 2 run with one command:
+
+```bash
+cd ~/ros2_ws
+# build my_drone_control and localization_sensor_sim as described in "Assignment 2 — Localization plots"
+./2lrs.sh                                   # optional: REPO_DIR=... SEED=... ./2lrs.sh
+```
+
+- It opens a terminal running `localization_plots.launch.py` with `run_mission:=true`. That
+  launch starts Gazebo (localization world, seeded), SITL, MAVROS, the sensor simulation, the
+  EKF, the plotter and the estimator-driven `outdoor_mission`.
+- The terminal you started it from becomes the test console:
+
+| Key | Action |
+|---|---|
+| `e` | Toggle GPS off/on (press once to start the outage, again to end it) |
+| `o` | Inject one GPS outlier (the EKF should log `GPS REJECTED`) |
+| `q` | Leave the key loop (the simulation keeps running) |
+
+Defaults: `REPO_DIR=~/Documents/github/LRS-URK`, `ROS2_WS=~/ros2_ws`, `SEED=42`.
 
 [Back to Contents](#contents)
 
