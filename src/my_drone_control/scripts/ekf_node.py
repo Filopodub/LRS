@@ -51,6 +51,12 @@ class EKFNode(Node):
         self.declare_parameter('r_vo_vel', 0.0009)
         self.declare_parameter('fuse_vo_position', False)
         self.declare_parameter('r_vo_pos', 0.25)
+        # Point 3: innovation gate and sensor watchdog
+        self.declare_parameter('gps_gate_chi2', 11.34)  # chi2, 3 DOF, 99 %
+        self.declare_parameter('gps_max_consecutive_rejects', 10)
+        self.declare_parameter('gps_timeout_s', 1.0)
+        self.declare_parameter('vo_timeout_s', 0.5)
+        self.declare_parameter('imu_timeout_s', 0.2)
 
         p = lambda name: self.get_parameter(name).value
 
@@ -66,6 +72,13 @@ class EKFNode(Node):
         self.R_vo_vel = np.eye(3) * p('r_vo_vel')
         self.fuse_vo_position = p('fuse_vo_position')
         self.R_vo_pos = np.eye(3) * p('r_vo_pos')
+        self.gps_gate = float(p('gps_gate_chi2'))
+        self.gps_max_rejects = int(p('gps_max_consecutive_rejects'))
+        self.gps_rejects = 0
+        self.timeouts = {
+            'GPS': p('gps_timeout_s'), 'VO': p('vo_timeout_s'), 'IMU': p('imu_timeout_s')}
+        self.last_arrival = {}   # sensor -> node clock time of last message
+        self.lost_since = {}     # sensor -> node clock time it was declared lost
 
         self.x = np.zeros(self.N)
         self.P = np.eye(self.N)
@@ -92,7 +105,30 @@ class EKFNode(Node):
         self.create_subscription(
             Odometry, '/localization/vo', self.on_vo, qos_profile_sensor_data)
 
+        self.create_timer(0.1, self.watchdog)
+
         self.get_logger().info('EKF Node initialized. Waiting for sensor data...')
+
+    def mark_arrival(self, sensor):
+        now = self.get_clock().now()
+        self.last_arrival[sensor] = now
+        if sensor in self.lost_since:
+            gap = (now - self.lost_since.pop(sensor)).nanoseconds * 1e-9
+            gap += self.timeouts[sensor]
+            self.get_logger().info(
+                f'{sensor} RECOVERED after ~{gap:.1f} s; resuming {sensor} updates')
+
+    def watchdog(self):
+        """Log sensor timeout transitions once (not at sensor rate)."""
+        now = self.get_clock().now()
+        for sensor, last in self.last_arrival.items():
+            if sensor in self.lost_since:
+                continue
+            if (now - last).nanoseconds * 1e-9 > self.timeouts[sensor]:
+                self.lost_since[sensor] = now
+                self.get_logger().warning(
+                    f'{sensor} TIMEOUT (> {self.timeouts[sensor]:.1f} s without data); '
+                    'continuing on prediction and remaining sensors')
 
     def try_initialise(self):
         if self.initialised:
@@ -121,6 +157,7 @@ class EKFNode(Node):
 
     def on_imu(self, msg):
         t = stamp_to_sec(msg.header.stamp)
+        self.mark_arrival('IMU')
 
         if self.last_imu_stamp > 0.0 and t < self.last_imu_stamp - 0.5:
             self.last_imu_stamp = t
@@ -179,9 +216,10 @@ class EKFNode(Node):
         innov = z - h
         S = H @ self.P @ H.T + R
         try:
-            K = self.P @ H.T @ np.linalg.inv(S)
+            # K = P H^T S^-1, solved as S K^T = H P^T instead of inverting S
+            K = np.linalg.solve(S, H @ self.P.T).T
         except np.linalg.LinAlgError:
-            self.get_logger().warning('EKF update skipped: S matrix inversion failed')
+            self.get_logger().warning('EKF update skipped: S matrix is singular')
             return
 
         self.x = self.x + K @ innov
@@ -194,10 +232,13 @@ class EKFNode(Node):
 
     def on_gps(self, msg):
         t = stamp_to_sec(msg.header.stamp)
+        self.mark_arrival('GPS')
 
         if self.last_gps_stamp > 0.0 and t < self.last_gps_stamp - 0.5:
-            self.last_gps_stamp = t
+            self.last_gps_stamp = t  # simulation clock reset
             return
+        if t <= self.last_gps_stamp:
+            return  # duplicate / out-of-order sample
         self.last_gps_stamp = t
 
         pos = msg.pose.pose.position
@@ -227,14 +268,37 @@ class EKFNode(Node):
         z = gps_pos
         h = self.x[0:3]
 
+        # Innovation gate: normalised innovation squared r^T S^-1 r ~ chi2(3)
+        r = z - h
+        S = H @ self.P @ H.T + R
+        try:
+            nis = float(r @ np.linalg.solve(S, r))
+        except np.linalg.LinAlgError:
+            return
+        if not np.isfinite(nis) or nis > self.gps_gate:
+            self.gps_rejects += 1
+            if self.gps_rejects <= self.gps_max_rejects:
+                self.get_logger().warning(
+                    f'GPS REJECTED: NIS={nis:.1f} > gate {self.gps_gate:.2f} '
+                    f'(innovation {np.linalg.norm(r):.2f} m, '
+                    f'{self.gps_rejects} consecutive)')
+                return
+            self.get_logger().warning(
+                f'GPS accepted after {self.gps_rejects} consecutive rejections '
+                '(estimate likely diverged; re-anchoring on GPS)')
+        self.gps_rejects = 0
+
         self.correct(z, h, H, R)
 
     def on_vo(self, msg):
         t = stamp_to_sec(msg.header.stamp)
+        self.mark_arrival('VO')
 
         if self.last_vo_stamp > 0.0 and t < self.last_vo_stamp - 0.5:
-            self.last_vo_stamp = t
+            self.last_vo_stamp = t  # simulation clock reset
             return
+        if t <= self.last_vo_stamp:
+            return  # duplicate / out-of-order sample
         self.last_vo_stamp = t
 
         pose = msg.pose.pose

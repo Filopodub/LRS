@@ -36,6 +36,11 @@ void OutdoorMission::declareParameters()
   p.position_tolerance = declare_parameter<double>("position_tolerance", p.position_tolerance);
   p.yaw_tolerance = declare_parameter<double>("yaw_tolerance", p.yaw_tolerance);
   p.landing_tolerance = declare_parameter<double>("landing_tolerance", p.landing_tolerance);
+  p.use_estimator = declare_parameter<bool>("use_estimator", p.use_estimator);
+  p.estimator_pose_topic = declare_parameter<std::string>(
+    "estimator_pose_topic", p.estimator_pose_topic);
+  p.velocity_gain = declare_parameter<double>("velocity_gain", p.velocity_gain);
+  p.max_velocity = declare_parameter<double>("max_velocity", p.max_velocity);
 
   if (p.target_altitude <= 0.0 || p.altitude_tolerance <= 0.0 || p.min_satellites < 0 ||
     p.home_timeout <= 0.0 || p.hover_time < 0.0 || p.square_side <= 0.0 ||
@@ -58,41 +63,46 @@ void OutdoorMission::createInterfaces()
       state_received_ = true;
       state_update_time_ = now();
     });
-  gps_sub_ = create_subscription<sensor_msgs::msg::NavSatFix>(
-    "mavros/global_position/global", rclcpp::SensorDataQoS(),
-    [this](const sensor_msgs::msg::NavSatFix::SharedPtr message) {
-      gps_ = *message;
-      gps_received_ = true;
-      gps_update_time_ = now();
-    });
-  satellites_sub_ = create_subscription<std_msgs::msg::UInt32>(
-    "mavros/global_position/raw/satellites", rclcpp::SensorDataQoS(),
-    [this](const std_msgs::msg::UInt32::SharedPtr message) {
-      satellites_ = message->data;
-      satellites_received_ = true;
-      satellites_update_time_ = now();
-    });
-  home_sub_ = create_subscription<mavros_msgs::msg::HomePosition>(
-    "mavros/home_position/home", rclcpp::SensorDataQoS(),
-    [this](const mavros_msgs::msg::HomePosition::SharedPtr message) {
-      if (origin_set_) {
-        return;
-      }
-      setOrigin(message->geo.latitude, message->geo.longitude, message->geo.altitude,
-                "home position");
-    });
-  compass_sub_ = create_subscription<std_msgs::msg::Float64>(
-    "mavros/global_position/compass_hdg", rclcpp::SensorDataQoS(),
-    [this](const std_msgs::msg::Float64::SharedPtr message) {
-      compass_heading_deg_ = message->data;
-      compass_received_ = true;
-    });
-  altitude_sub_ = create_subscription<std_msgs::msg::Float64>(
-    "mavros/global_position/rel_alt", rclcpp::SensorDataQoS(),
-    [this](const std_msgs::msg::Float64::SharedPtr message) {
-      relative_altitude_ = message->data;
-      altitude_received_ = true;
-    });
+  if (params_.use_estimator) {
+    // No MAVROS GPS/home/compass/altitude: the mission origin is the first EKF pose.
+    origin_set_ = true;
+  } else {
+    gps_sub_ = create_subscription<sensor_msgs::msg::NavSatFix>(
+      "mavros/global_position/global", rclcpp::SensorDataQoS(),
+      [this](const sensor_msgs::msg::NavSatFix::SharedPtr message) {
+        gps_ = *message;
+        gps_received_ = true;
+        gps_update_time_ = now();
+      });
+    satellites_sub_ = create_subscription<std_msgs::msg::UInt32>(
+      "mavros/global_position/raw/satellites", rclcpp::SensorDataQoS(),
+      [this](const std_msgs::msg::UInt32::SharedPtr message) {
+        satellites_ = message->data;
+        satellites_received_ = true;
+        satellites_update_time_ = now();
+      });
+    home_sub_ = create_subscription<mavros_msgs::msg::HomePosition>(
+      "mavros/home_position/home", rclcpp::SensorDataQoS(),
+      [this](const mavros_msgs::msg::HomePosition::SharedPtr message) {
+        if (origin_set_) {
+          return;
+        }
+        setOrigin(message->geo.latitude, message->geo.longitude, message->geo.altitude,
+                  "home position");
+      });
+    compass_sub_ = create_subscription<std_msgs::msg::Float64>(
+      "mavros/global_position/compass_hdg", rclcpp::SensorDataQoS(),
+      [this](const std_msgs::msg::Float64::SharedPtr message) {
+        compass_heading_deg_ = message->data;
+        compass_received_ = true;
+      });
+    altitude_sub_ = create_subscription<std_msgs::msg::Float64>(
+      "mavros/global_position/rel_alt", rclcpp::SensorDataQoS(),
+      [this](const std_msgs::msg::Float64::SharedPtr message) {
+        relative_altitude_ = message->data;
+        altitude_received_ = true;
+      });
+  }
 
   mode_client_ = create_client<mavros_msgs::srv::SetMode>("mavros/set_mode");
   arm_client_ = create_client<mavros_msgs::srv::CommandBool>("mavros/cmd/arming");
@@ -112,9 +122,20 @@ void OutdoorMission::initializeFlightAssistant()
 {
   assistant_ = std::make_shared<FlightAssistant>("map");
   assistant_->attachNode(shared_from_this());
+  const std::string pose_topic =
+    params_.use_estimator ? params_.estimator_pose_topic : "mavros/local_position/pose";
+  RCLCPP_INFO(get_logger(), "Pose feedback: %s", pose_topic.c_str());
   pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-    "mavros/local_position/pose", rclcpp::SensorDataQoS(),
+    pose_topic, rclcpp::SensorDataQoS(),
     [this](const geometry_msgs::msg::PoseStamped::SharedPtr message) {
+      if (params_.use_estimator) {
+        if (!launch_z_set_) {
+          launch_z_ = message->pose.position.z;
+          launch_z_set_ = true;
+        }
+        relative_altitude_ = message->pose.position.z - launch_z_;
+        altitude_received_ = true;
+      }
       assistant_->updateLocalPose(*message);
       local_pose_ = *message;
       pose_received_ = true;
@@ -134,6 +155,9 @@ void OutdoorMission::setOrigin(double lat, double lon, double alt, const std::st
 
 bool OutdoorMission::gpsFixUsable() const
 {
+  if (params_.use_estimator) {
+    return true;  // the EKF handles GPS outages itself
+  }
   return gps_received_ &&
          satellites_received_ &&
          (now() - gps_update_time_).seconds() <= 2.0 &&
@@ -276,25 +300,27 @@ void OutdoorMission::start_square()
 
   poi_x_ = launch_x_ + params_.poi_east_offset;
   poi_y_ = launch_y_ + params_.poi_north_offset;
-  double launch_up = 0.0;
-  geodeticToEnu(gps_.latitude, gps_.longitude, gps_.altitude,
-                origin_lat_, origin_lon_, origin_alt_, launch_east_, launch_north_, launch_up);
+  if (!params_.use_estimator) {
+    double launch_up = 0.0;
+    geodeticToEnu(gps_.latitude, gps_.longitude, gps_.altitude,
+                  origin_lat_, origin_lon_, origin_alt_, launch_east_, launch_north_, launch_up);
 
-  double lat = 0.0;
-  double lon = 0.0;
-  double alt = 0.0;
-  enuToGeodetic(launch_east_ + params_.poi_east_offset,
-                launch_north_ + params_.poi_north_offset, 0.0,
-                origin_lat_, origin_lon_, origin_alt_, lat, lon, alt);
-  RCLCPP_INFO(get_logger(),
-              "POI: offset E=%.2f N=%.2f m from launch -> lat=%.7f lon=%.7f",
-              params_.poi_east_offset, params_.poi_north_offset, lat, lon);
-  for (int i = 0; i < 4; ++i) {
-    enuToGeodetic(launch_east_ + offsets[i][0], launch_north_ + offsets[i][1],
-                  params_.target_altitude,
+    double lat = 0.0;
+    double lon = 0.0;
+    double alt = 0.0;
+    enuToGeodetic(launch_east_ + params_.poi_east_offset,
+                  launch_north_ + params_.poi_north_offset, 0.0,
                   origin_lat_, origin_lon_, origin_alt_, lat, lon, alt);
-    RCLCPP_INFO(get_logger(), "%s: E=%.2f N=%.2f m from launch -> lat=%.7f lon=%.7f",
-                waypoints_[i].name.c_str(), offsets[i][0], offsets[i][1], lat, lon);
+    RCLCPP_INFO(get_logger(),
+                "POI: offset E=%.2f N=%.2f m from launch -> lat=%.7f lon=%.7f",
+                params_.poi_east_offset, params_.poi_north_offset, lat, lon);
+    for (int i = 0; i < 4; ++i) {
+      enuToGeodetic(launch_east_ + offsets[i][0], launch_north_ + offsets[i][1],
+                    params_.target_altitude,
+                    origin_lat_, origin_lon_, origin_alt_, lat, lon, alt);
+      RCLCPP_INFO(get_logger(), "%s: E=%.2f N=%.2f m from launch -> lat=%.7f lon=%.7f",
+                  waypoints_[i].name.c_str(), offsets[i][0], offsets[i][1], lat, lon);
+    }
   }
 
   waypoint_index_ = 0;
@@ -435,6 +461,19 @@ void OutdoorMission::publish_setpoint(double x, double y, double z, double yaw_d
   setpoint.position.x = x;
   setpoint.position.y = y;
   setpoint.position.z = z;
+  if (params_.use_estimator) {
+    // Close the loop on the EKF estimate: P-controller -> velocity setpoint.
+    const auto &est = local_pose_.pose.position;
+    const double k = params_.velocity_gain;
+    const double v = params_.max_velocity;
+    setpoint.type_mask =
+      PositionTarget::IGNORE_PX | PositionTarget::IGNORE_PY | PositionTarget::IGNORE_PZ |
+      PositionTarget::IGNORE_AFX | PositionTarget::IGNORE_AFY | PositionTarget::IGNORE_AFZ |
+      PositionTarget::IGNORE_YAW_RATE;
+    setpoint.velocity.x = std::clamp(k * (x - est.x), -v, v);
+    setpoint.velocity.y = std::clamp(k * (y - est.y), -v, v);
+    setpoint.velocity.z = std::clamp(k * (z - est.z), -v, v);
+  }
   setpoint.yaw = static_cast<float>(yaw_deg * kPi / 180.0);  // ENU, radians
   setpoint_pub_->publish(setpoint);
 }
@@ -627,7 +666,8 @@ void OutdoorMission::request_takeoff()
   // Launch point in the local frame: W1 of the square and reference for the flight altitude
   launch_x_ = local_pose_.pose.position.x;
   launch_y_ = local_pose_.pose.position.y;
-  flight_z_ = local_pose_.pose.position.z + params_.target_altitude;
+  flight_z_ = (params_.use_estimator ? launch_z_ : local_pose_.pose.position.z) +
+    params_.target_altitude;
   takeoff_request_pending_ = true;
   takeoff_client_->async_send_request(request,
     [this](rclcpp::Client<mavros_msgs::srv::CommandTOL>::SharedFuture future) {

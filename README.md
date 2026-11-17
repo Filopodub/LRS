@@ -140,7 +140,7 @@ Published outputs:
 - **Topic**: `/localization/ekf` as `nav_msgs/msg/Odometry` (`frame_id='map'`, `child_frame_id='base_link'`).
 - **Pose topic**: `/localization/ekf_pose` as `geometry_msgs/msg/PoseStamped` (`frame_id='map'`).
 - **Covariance**: Full 6×6 pose covariance ($x, y, z, \text{roll}, \text{pitch}, \text{yaw}$) and twist covariance ($v_x, v_y, v_z$).
-- **Controller consumption**: `localization_square_mission` subscribes directly to `/localization/ekf` to monitor horizontal position tracking error against leg waypoints during flight.
+- **Controller consumption**: `outdoor_mission` with `use_estimator:=true` uses `/localization/ekf_pose` as its only position/yaw feedback (see §8).
 
 ### 2. Prediction model (IMU-driven constant velocity)
 
@@ -218,6 +218,44 @@ The `localization_plotter.py` node:
 - Computes and renders the dynamic **2-$\sigma$ horizontal covariance ellipse** centered on the estimated $(x, y)$ position on the **Horizontal track** subplot.
 - Overlays the EKF state tracks in red across **all 6 subplots** (Horizontal track, X, Y, Altitude, Yaw, and Yaw rate).
 - Displays EKF stream health, sim-time progress, and RMS position error vs ground truth in the live diagnostics summary.
+
+### 7. Missing and bad measurements (Assignment 2.3)
+
+- **GPS outlier gate**: before each GPS update the normalised innovation squared
+  $d^2 = \mathbf{r}^T \mathbf{S}^{-1} \mathbf{r}$, with $\mathbf{S} = \mathbf{H}\mathbf{P}\mathbf{H}^T + \mathbf{R}$,
+  is compared with `gps_gate_chi2` (default 11.34, the 99 % quantile of $\chi^2_3$). Because the
+  gate uses $\mathbf{S}$, it widens automatically after an outage, when $\mathbf{P}$ has grown.
+  Rejections are logged with their NIS value. After `gps_max_consecutive_rejects` (default 10)
+  consecutive rejections the sample is accepted, so a diverged estimate cannot lock GPS out forever.
+- **Outages**: the filter keeps predicting on IMU and fusing whichever sensors remain. It never
+  resets. A 10 Hz watchdog logs a single `TIMEOUT` / `RECOVERED` transition per sensor
+  (`gps_timeout_s` = 1.0, `vo_timeout_s` = 0.5, `imu_timeout_s` = 0.2), never at sensor rate.
+- Duplicate or out-of-order stamps ($t \le t_{\text{last}}$) are dropped. The Kalman gain is
+  computed with `np.linalg.solve` rather than an explicit inverse.
+- **Manual GPS outage**: in the terminal running `lrs.sh`, press `e` to disable GPS and `e` again
+  to re-enable it (calls `/localization/set_gps_enabled`). Press `q` to leave the key loop.
+
+### 8. Flight using estimated localisation (Assignment 2.4)
+
+`outdoor_mission` (the A1.3 square + figure-8) has a `use_estimator` mode. When it is on:
+
+- Pose feedback comes from `/localization/ekf_pose` (`map`, ENU). The node does not subscribe to
+  any `/mavros/local_position/*` or `/mavros/global_position/*` topic (GPS fix, home, compass and
+  `rel_alt` are all disabled).
+- The first EKF pose is the mission origin. Relative altitude is the estimated $z$ minus that first $z$.
+- Each setpoint becomes a velocity command,
+  $\mathbf{v} = \text{clamp}(k_p(\mathbf{p}_{\text{target}} - \hat{\mathbf{p}}), \pm v_{\max})$
+  (`velocity_gain` = 0.8, `max_velocity` = 1.0), plus an absolute ENU yaw on
+  `/mavros/setpoint_raw/local`. This means the loop is closed on the estimate, not on ArduPilot's own position.
+- MAVROS is used only for state, mode, arming, takeoff and LAND.
+
+```bash
+ros2 launch my_drone_control localization_plots.launch.py \
+  repo_dir:="$HOME/LRS-URK" seed:=42 run_mission:=true
+```
+
+Mission parameters for this run: 2 m altitude, 4 m square at 0.5 m/s, then one figure-8
+(A = 2 m, ω = 0.2 rad/s) centred at (+2, −2) m from the origin, return and LAND.
 
 [Back to Contents](#contents)
 

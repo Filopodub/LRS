@@ -46,6 +46,11 @@ struct OutdoorMissionParams
   double position_tolerance = 0.3;   // [m] corner reached
   double yaw_tolerance = 5.0;        // [deg] nose vs. POI bearing at a corner
   double landing_tolerance = 0.3;    // [m] relative altitude to finish landing
+  // Assignment 2.4: fly on the EKF estimate instead of MAVROS localisation
+  bool use_estimator = false;
+  std::string estimator_pose_topic = "/localization/ekf_pose";
+  double velocity_gain = 0.8;        // [1/s] P gain, estimate -> velocity setpoint
+  double max_velocity = 1.0;         // [m/s] per-axis velocity setpoint limit
 };
 
 struct Waypoint
@@ -164,6 +169,8 @@ private:
   double launch_east_{0.0};
   double launch_north_{0.0};
   double flight_z_{0.0};
+  double launch_z_{0.0};             // first valid estimated altitude (estimator mode)
+  bool launch_z_set_{false};
   double poi_x_{0.0};
   double poi_y_{0.0};
   double segment_start_x_{0.0};

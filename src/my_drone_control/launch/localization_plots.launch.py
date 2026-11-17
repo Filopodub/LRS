@@ -22,6 +22,7 @@ def generate_launch_description():
     repo_dir = LaunchConfiguration('repo_dir')
     seed = LaunchConfiguration('seed')
     run_square = LaunchConfiguration('run_square')
+    run_mission = LaunchConfiguration('run_mission')
     world = PathJoinSubstitution([
         repo_dir, 'worlds', 'fei_lrs_gazebo_localization.world'])
     model_path = PathJoinSubstitution([repo_dir, 'models'])
@@ -79,6 +80,28 @@ def generate_launch_description():
         condition=IfCondition(run_square),
         parameters=[{'use_sim_time': True}],
     )
+    # Assignment 2.4: square + figure-8 flown on the EKF estimate
+    ekf_mission = Node(
+        package='my_drone_control',
+        executable='outdoor_mission',
+        name='outdoor_mission',
+        output='screen',
+        condition=IfCondition(run_mission),
+        parameters=[{
+            'use_sim_time': True,
+            'use_estimator': True,
+            'target_altitude': 2.0,
+            'square_side': 4.0,
+            'square_speed': 0.5,
+            'poi_east_offset': 2.0,
+            'poi_north_offset': -2.0,
+            'figure_eight_amplitude': 2.0,
+            'figure_eight_omega': 0.2,
+            'position_tolerance': 0.4,
+            'yaw_tolerance': 10.0,
+            'hover_time': 3.0,
+        }],
+    )
 
     start_sensors_and_sitl = RegisterEventHandler(
         OnProcessStart(
@@ -98,7 +121,7 @@ def generate_launch_description():
     start_square_after_mavros = RegisterEventHandler(
         OnProcessStart(
             target_action=mavros,
-            on_start=[TimerAction(period=10.0, actions=[square_mission])],
+            on_start=[TimerAction(period=10.0, actions=[square_mission, ekf_mission])],
         )
     )
     return LaunchDescription([
@@ -115,6 +138,11 @@ def generate_launch_description():
             'run_square',
             default_value='false',
             description='Arm SITL and fly the optional localization characterization square',
+        ),
+        DeclareLaunchArgument(
+            'run_mission',
+            default_value='false',
+            description='Fly the square + figure-8 mission using the EKF estimate as feedback',
         ),
         plotter,
         ekf_node,
