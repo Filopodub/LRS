@@ -58,6 +58,30 @@ def generate_launch_description():
         ])),
         launch_arguments={'seed': seed}.items(),
     )
+    gps_keyboard = ExecuteProcess(
+        cmd=[
+            'gnome-terminal', '--title=Localization GPS control', '--', 'bash', '-ic',
+            'gps_enabled=true\n'
+            'echo "Press e to disable/enable GPS, q to close this window."\n'
+            'while IFS= read -rsn1 key; do\n'
+            '  case "$key" in\n'
+            '    e|E)\n'
+            '      if $gps_enabled; then want=false; else want=true; fi\n'
+            '      if ros2 service call /localization/set_gps_enabled '
+            'std_srvs/srv/SetBool "{data: $want}" >/dev/null 2>&1; then\n'
+            '        gps_enabled=$want\n'
+            '        echo "GPS enabled -> $gps_enabled"\n'
+            '      else\n'
+            '        echo "GPS toggle failed (is localization_sensor_sim running?)"\n'
+            '      fi\n'
+            '      ;;\n'
+            '    q|Q) exit ;;\n'
+            '  esac\n'
+            'done',
+        ],
+        name='gps_keyboard_control',
+        output='screen',
+    )
     plotter = Node(
         package='my_drone_control',
         executable='localization_plotter.py',
@@ -146,6 +170,7 @@ def generate_launch_description():
         ),
         plotter,
         ekf_node,
+        gps_keyboard,
         start_sensors_and_sitl,
         start_mavros,
         start_square_after_mavros,
