@@ -151,6 +151,20 @@ private:
           RCLCPP_ERROR(get_logger(), "FCU disarmed during square; stopping mission");
           return;
         }
+        switch (leg_index_ % 4) {
+          case 0:
+            yaw_ = -1.57079632679;
+            break;
+          case 1:
+            yaw_ = 0.0;
+            break;
+          case 2:
+            yaw_ = 1.57079632679;
+            break;
+          default:
+            yaw_ = 3.14159265359;
+            break;
+        }
         publish_setpoint(target_for_current_phase());
         if (ekf_received_ && (now() - last_ekf_log_).seconds() >= 2.0) {
           last_ekf_log_ = now();

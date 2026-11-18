@@ -352,8 +352,15 @@ void OutdoorMission::square_step()
   setpoint_x_ = segment_start_x_ + dx * progress;
   setpoint_y_ = segment_start_y_ + dy * progress;
 
-  // Bearing from the actual position to the POI, recomputed every cycle (ENU)
-  desired_yaw_deg_ = std::atan2(poi_y_ - y, poi_x_ - x) * 180.0 / kPi;
+  double heading_east = dx;
+  double heading_north = dy;
+  if (length < 1e-3 && waypoint_index_ + 1 < waypoints_.size()) {
+    heading_east = waypoints_[waypoint_index_ + 1].x - target.x;
+    heading_north = waypoints_[waypoint_index_ + 1].y - target.y;
+  }
+  if (std::hypot(heading_east, heading_north) >= 1e-3) {
+    desired_yaw_deg_ = std::atan2(heading_north, heading_east) * 180.0 / kPi;
+  }
   yaw_error_deg_ = wrapDeg(yawFromQuaternionDeg(local_pose_.pose.orientation) - desired_yaw_deg_);
 
   publish_setpoint(setpoint_x_, setpoint_y_, flight_z_, desired_yaw_deg_);
