@@ -1,23 +1,29 @@
-# My Drone Control — Map Processing and Mission Path Planning
+# My Drone Control — A1 Mapping and A2 Localization
 
 A ROS 2 package for 3D PCD map processing, voxel grid downsampling, 3D obstacle inflation, spatial occupancy querying, mission CSV waypoint parsing, 3D A* path planning, and line-of-sight path post-processing for autonomous drone navigation in hangar environments.
 
 ## Contents
 
-- [A1.1 — Map processing and path planning](#a1-1-map-processing)
-- [A1.2 — Mission execution, indoor flight](#a1-2-mission-execution)
-- [A1.3 — Outdoor GPS mission](#a1-3-outdoor-mission)
-- [Assignment 2 — Localization plots](#assignment-2-localization-plots)
-- [Assignment 2.2 — Eight-state Extended Kalman Filter (EKF)](#assignment-2-2-ekf)
+- [A1 — Mapping and missions](#a1-mapping-and-missions)
+  - [A1.1 — Map processing and path planning](#a1-1-map-processing)
+  - [A1.2 — Mission execution, indoor flight](#a1-2-mission-execution)
+  - [A1.3 — Outdoor GPS mission](#a1-3-outdoor-mission)
+- [A2 — Localization and EKF flight](#a2-localization-and-ekf-flight)
+  - [A2.1 — Localization plots and sensor controls](#assignment-2-localization-plots)
+  - [A2.2 — Eight-state Extended Kalman Filter (EKF)](#assignment-2-2-ekf)
 - [Prerequisites and build](#prerequisites-and-build)
+- [Start A1 and A2](#start-a1-and-a2)
 - [How to run](#how-to-run)
 - [ROS 2 interface](#ros-2-interface)
 - [Solution diagrams](#solution-diagrams)
 
 ---
 
+<a id="a1-mapping-and-missions"></a>
+## A1 — Mapping and missions
+
 <a id="a1-1-map-processing"></a>
-## A1.1 — Map processing and path planning
+### A1.1 — Map processing and path planning
 
 ### 1. Map representation
 
@@ -41,8 +47,62 @@ Greedy line-of-sight shortcutting replaces a path section with the furthest late
 
 [Back to Contents](#contents)
 
+<a id="a1-2-mission-execution"></a>
+### A1.2 — Mission execution, indoor flight
+
+The planner publishes `/planned_commands`; `takeoff_drone` controls MAVROS. A mission file can be selected at runtime with `-p mission_path:=/path/to/file.csv`. The controller runs at 10 Hz and `FlightAssistant` sends position setpoints at 20 Hz.
+
+#### Position and precision
+
+Map positions are converted to local targets using `local_x = -map_y`, `local_y = map_x`, `local_z = map_z`.
+
+| Precision | Position radius | Yaw tolerance |
+| --- | ---: | ---: |
+| `soft` | 0.30 m | 10° |
+| `hard` | 0.15 m | 5° |
+
+The tighter hard radius is intended for accurate task goals; the looser soft radius allows more transit tolerance. **Known limits:** arrival is a single position/yaw sample, without a settling period or velocity check. Intermediate planned points are also processed in order and can inherit hard precision, so they may cause stops instead of passing through.
+
+#### Tasks and heading
+
+`takeoff` uses the first takeoff row's Z (or the `target_altitude` parameter) and monitors relative altitude. `land` lowers the local Z target and exits near ground level; it does not request LAND mode or confirm disarming. `landtakeoff` descends and climbs again but does not re-arm or restore GUIDED after touchdown.
+
+Yaw setpoints use ROS ENU: zero is East and positive is counter-clockwise. `yaw<degrees>` adds to an internal target that starts at zero, rather than the measured aircraft heading. The controller does not calculate the next segment bearing or unwrap to the shortest turn, so forward-facing travel and reliable absolute/relative yaw tasks remain incomplete. MAVROS converts ENU targets to the FCU's NED convention.
+
+[Back to Contents](#contents)
+
+<a id="a1-3-outdoor-mission"></a>
+### A1.3 — Outdoor GPS mission
+
+The outdoor mission is relative to the captured home/origin: **takeoff → square → POI transit → figure-8 → return → land**. Parameters keep the required 5 m altitude, 5 m square, and 3 m amplitude. The default `figure_eight_omega = 0.25 rad/s` gives peak speed `Aω√2 ≈ 1.06 m/s` and lap time `2π/ω ≈ 25.1 s`.
+
+#### GPS, coordinates, compass, and altitude
+
+The node waits for a fresh valid GPS fix and at least six satellites before requesting mode or arming. It prefers MAVROS home, falling back to the first usable fix after five seconds. Planning offsets are local ENU, not fixed absolute coordinates. Geodetic-to-ENU and inverse conversions use a flat-Earth tangent approximation with the equatorial radius. Over 50 m, curvature contributes under 1 mm; the radius approximation contributes about 0.2% scale error (about 0.1 m), before GPS error.
+
+GPS altitude is AMSL; `/mavros/global_position/rel_alt` is above home; setpoint Z is local ENU up. The mission requests 5 m takeoff and checks relative altitude. Compass is magnetic degrees clockwise from North; pose/setpoint yaw is ENU degrees counter-clockwise from East, with `yaw_ENU = wrap(90° - heading)`. The node logs both conventions for comparison; empirical agreement while rotating in SITL still needs validation. Yaw aims horizontally at the POI; no camera pitch is commanded.
+
+#### Square, trajectory, and return
+
+At 20 Hz, the node recomputes bearing to a parameterized POI while following the four 5 m square edges. It then transits to the POI before starting the timer-driven figure-8:
+
+$$x=x_{POI}+A\sin(t),\quad y=y_{POI}+A\sin(t)\cos(t),\quad t=\omega(now-t_{start})$$
+
+For default offsets (2.5 m East, -2.5 m North), the square's far corner is 7.07 m from launch; the farthest figure-8 point is about 6.37 m from launch. The square therefore sets the 7.07 m horizontal bound. Add launch-to-home offset when checking the home-centred geofence; the node does not enforce a geofence. Tangent yaw is commanded with each setpoint and unwrapped between updates. Smooth tracking and completion have not yet been evidenced by a full SITL run.
+
+After one lap it returns to launch and requests LAND. `/outdoor_mission/abort` also requests LAND. If FCU/GPS/pose freshness or GUIDED mode is lost in flight, it stops publishing mission setpoints. Demonstrate abort and full mission in SITL before any real flight; an instructor and safety pilot are required.
+
+```bash
+ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
+```
+
+[Back to Contents](#contents)
+
+<a id="a2-localization-and-ekf-flight"></a>
+## A2 — Localization and EKF flight
+
 <a id="assignment-2-localization-plots"></a>
-## Assignment 2 — Localization plots
+### A2.1 — Localization plots and sensor controls
 
 The localization plot tool is separate from the estimator and controllers. It
 subscribes to GPS, VO, IMU, and evaluation ground truth for visualization only;
@@ -121,9 +181,9 @@ terminal focused on MAVROS status, sensor readiness, and mission progress.
 ---
 
 <a id="assignment-2-2-ekf"></a>
-## Assignment 2.2 — Eight-state Extended Kalman Filter (EKF)
+### A2.2 — Eight-state Extended Kalman Filter (EKF)
 
-The EKF implementation runs in its own independent node (`ekf_node.py`), fusing high-rate IMU data for prediction with asynchronous GPS and Visual Odometry (VO) measurements for correction.
+The custom EKF runs in `ekf_node.py`. It predicts from the simulated IMU's yaw-rate Z, corrects ENU position from GPS, and corrects yaw and velocity from VO. It does not use MAVROS pose feedback, IMU orientation, accelerometer data, or ground truth. The controller consumes the published estimate, so this is a closed-loop localization flight rather than an EKF display beside the original GPS-feedback mission.
 
 ### 1. State vector and frame conventions
 
@@ -204,12 +264,11 @@ The gyro bias $b$ is not directly measured by any sensor, but becomes fully obse
 
 ### 5. Deliberate initialization
 
-The estimator deliberately waits for the first valid GPS position and the first VO yaw before launching the filter:
-- $\hat{\mathbf{p}}_0 = \mathbf{p}_{\text{first GPS}}$
-- $\hat{\mathbf{v}}_0 = [0, 0, 0]^T$ with initial variance $1.0\,\text{m}^2/\text{s}^2$
-- $\hat{\psi}_0 = \psi_{\text{first VO}}$ with initial variance $(\pi/4)^2\,\text{rad}^2$
-- $\hat{b}_0 = 0\,\text{rad/s}$ with initial variance $(0.1)^2\,(\text{rad/s})^2$
-- Ground truth (`/evaluation/ground_truth`) is strictly forbidden and never accessed by the estimator.
+The filter initializes when the first GPS position arrives:
+- $\hat{\mathbf{p}}_0 = \mathbf{p}_{\text{first GPS}}$ and $\hat{\mathbf{v}}_0 = [0, 0, 0]^T$.
+- If a VO yaw has already arrived, it seeds $\hat{\psi}_0$; otherwise yaw starts at zero and the next VO yaw corrects it.
+- Initial variances are GPS-derived for position, $1.0\,\text{m}^2/\text{s}^2$ for velocity, $(\pi/4)^2\,\text{rad}^2$ for yaw, and $(0.1)^2\,(\text{rad/s})^2$ for gyro bias.
+- VO position is recorded during startup but is not fused. Ground truth (`/evaluation/ground_truth`) is never subscribed to by the estimator.
 
 ### 6. Plotter integration
 
@@ -258,120 +317,82 @@ ros2 launch my_drone_control localization_plots.launch.py \
 Mission parameters for this run: 2 m altitude, 4 m square at 0.5 m/s, then one figure-8
 (A = 2 m, ω = 0.2 rad/s) centred at (+2, −2) m from the origin, return and LAND.
 
-### 9. Start script (`2lrs.sh`)
+### 9. Starting A2 and manual sensor tests
 
-`2lrs.sh` starts the whole Assignment 2 run with one command:
-
-```bash
-cd ~/ros2_ws
-# build my_drone_control and localization_sensor_sim as described in "Assignment 2 — Localization plots"
-./2lrs.sh                                   # optional: REPO_DIR=... SEED=... ./2lrs.sh
-```
-
-- It opens a terminal running `localization_plots.launch.py` with `run_mission:=true`. That
-  launch starts Gazebo (localization world, seeded), SITL, MAVROS, the sensor simulation, the
-  EKF, the plotter and the estimator-driven `outdoor_mission`.
-- The terminal you started it from becomes the test console:
-
-| Key | Action |
-|---|---|
-| `e` | Toggle GPS off/on (press once to start the outage, again to end it) |
-| `o` | Inject one GPS outlier (the EKF should log `GPS REJECTED`) |
-| `q` | Leave the key loop (the simulation keeps running) |
-
-Defaults: `REPO_DIR=~/Documents/github/LRS-URK`, `ROS2_WS=~/ros2_ws`, `SEED=42`.
-
-[Back to Contents](#contents)
-
----
-
-<a id="a1-2-mission-execution"></a>
-## A1.2 — Mission execution, indoor flight
-
-The planner publishes `/planned_commands`; `takeoff_drone` controls MAVROS. A mission file can be selected at runtime with `-p mission_path:=/path/to/file.csv`. The controller runs at 10 Hz and `FlightAssistant` sends position setpoints at 20 Hz.
-
-### Position and precision
-
-Map positions are converted to local targets using `local_x = -map_y`, `local_y = map_x`, `local_z = map_z`.
-
-| Precision | Position radius | Yaw tolerance |
-| --- | ---: | ---: |
-| `soft` | 0.30 m | 10° |
-| `hard` | 0.15 m | 5° |
-
-The tighter hard radius is intended for accurate task goals; the looser soft radius allows more transit tolerance. **Known limits:** arrival is a single position/yaw sample, without a settling period or velocity check. Intermediate planned points are also processed in order and can inherit hard precision, so they may cause stops instead of passing through.
-
-### Tasks and heading
-
-`takeoff` uses the first takeoff row's Z (or the `target_altitude` parameter) and monitors relative altitude. `land` lowers the local Z target and exits near ground level; it does not request LAND mode or confirm disarming. `landtakeoff` descends and climbs again but does not re-arm or restore GUIDED after touchdown.
-
-Yaw setpoints use ROS ENU: zero is East and positive is counter-clockwise. `yaw<degrees>` adds to an internal target that starts at zero, rather than the measured aircraft heading. The controller does not calculate the next segment bearing or unwrap to the shortest turn, so forward-facing travel and reliable absolute/relative yaw tasks remain incomplete. MAVROS converts ENU targets to the FCU's NED convention.
-
-[Back to Contents](#contents)
-
----
-
-<a id="a1-3-outdoor-mission"></a>
-## A1.3 — Outdoor GPS mission
-
-The outdoor mission is relative to the captured home/origin: **takeoff → square → POI transit → figure-8 → return → land**. Parameters keep the required 5 m altitude, 5 m square, and 3 m amplitude. The default `figure_eight_omega = 0.25 rad/s` gives peak speed `Aω√2 ≈ 1.06 m/s` and lap time `2π/ω ≈ 25.1 s`.
-
-### GPS, coordinates, compass, and altitude
-
-The node waits for a fresh valid GPS fix and at least six satellites before requesting mode or arming. It prefers MAVROS home, falling back to the first usable fix after five seconds. Planning offsets are local ENU, not fixed absolute coordinates. Geodetic-to-ENU and inverse conversions use a flat-Earth tangent approximation with the equatorial radius. Over 50 m, curvature contributes under 1 mm; the radius approximation contributes about 0.2% scale error (about 0.1 m), before GPS error.
-
-GPS altitude is AMSL; `/mavros/global_position/rel_alt` is above home; setpoint Z is local ENU up. The mission requests 5 m takeoff and checks relative altitude. Compass is magnetic degrees clockwise from North; pose/setpoint yaw is ENU degrees counter-clockwise from East, with `yaw_ENU = wrap(90° - heading)`. The node logs both conventions for comparison; empirical agreement while rotating in SITL still needs validation. Yaw aims horizontally at the POI; no camera pitch is commanded.
-
-### Square, trajectory, and return
-
-At 20 Hz, the node recomputes bearing to the parameterized POI while following the four 5 m square edges. It then transits to the POI before starting the timer-driven figure-8:
-
-$$x=x_{POI}+A\sin(t),\quad y=y_{POI}+A\sin(t)\cos(t),\quad t=\omega(now-t_{start})$$
-
-For default offsets (2.5 m East, -2.5 m North), the square’s far corner is 7.07 m from launch; the farthest figure-8 point is about 6.37 m from launch. The square therefore sets the 7.07 m horizontal bound. Add launch-to-home offset when checking the home-centred geofence; the node does not enforce a geofence. Tangent yaw is commanded with each setpoint and unwrapped between updates. Smooth tracking and completion have not yet been evidenced by a full SITL run.
-
-After one lap it returns to launch and requests LAND. `/outdoor_mission/abort` also requests LAND. If FCU/GPS/pose freshness or GUIDED mode is lost in flight, it stops publishing mission setpoints. Demonstrate abort and full mission in SITL before any real flight; an instructor and safety pilot are required.
-
-```bash
-ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
-```
-
-[Back to Contents](#contents)
-
----
-
-<a id="prerequisites-and-build"></a>
-## 2. Prerequisites & Build Instructions
-
-Ensure that ROS 2, PCL, and the package dependencies are installed.
-
-Build the package with:
-
-```bash
-cd /home/user/ros2_ws
-
-colcon build --packages-select my_drone_control
-
-source install/setup.bash
-```
-
-[Back to Contents](#contents)
-
----
-
-<a id="how-to-run"></a>
-## 3. How to Run
-
-### One-command startup
-
-Build and source the workspace, then run this command to start either complete
-simulation stack:
+Build and source the workspace as described below, then start the estimator, sensors, plots, and estimator-driven square plus figure-8 mission:
 
 ```bash
 cd ~/ros2_ws
 source /opt/ros/jazzy/setup.bash
-colcon build --packages-select my_drone_control
 source install/setup.bash
+ros2 launch my_drone_control localization_plots.launch.py \
+  repo_dir:="$HOME/LRS-URK" seed:=42 run_mission:=true
+```
+
+The launch starts the seeded localization world, SITL, MAVROS, sensor simulation, EKF, plotter, and `outdoor_mission` in estimator mode. It also opens a GPS-control terminal:
+
+| Key | Action |
+|---|---|
+| `e` | Toggle GPS off/on in the GPS-control terminal |
+| `q` | Close the GPS-control terminal; the simulation keeps running |
+
+To inject a one-shot GPS outlier or test another sensor outage, call the simulator service from a sourced terminal:
+
+```bash
+ros2 service call /localization/inject_gps_outlier std_srvs/srv/Trigger "{}"
+ros2 service call /localization/set_gps_enabled std_srvs/srv/SetBool "{data: false}"
+ros2 service call /localization/set_gps_enabled std_srvs/srv/SetBool "{data: true}"
+ros2 service call /localization/set_vo_enabled std_srvs/srv/SetBool "{data: false}"
+ros2 service call /localization/set_vo_enabled std_srvs/srv/SetBool "{data: true}"
+```
+
+Use the keyboard toggle or service calls for manual characterization only. The assessed mission should be started with no further manual input. `run_square:=true` starts the separate setpoint-only characterization square; do not enable it together with `run_mission:=true`.
+
+[Back to Contents](#contents)
+
+<a id="prerequisites-and-build"></a>
+## Prerequisites & Build
+
+Install ROS 2 Jazzy, PCL, MAVROS, Gazebo, and the dependencies documented for the `LRS-URK` simulator checkout. Build the main package and sensor simulator package from its separate checkout:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --base-paths src "$HOME/LRS-URK/localization_sensor_sim" \
+  --packages-select my_drone_control localization_sensor_sim
+source install/setup.bash
+```
+
+Set `LRS_REPO_DIR` if the simulator checkout is not at `~/LRS-URK`. For A1's interactive launcher, set `LRS_2_REPO_DIR` when its second simulator checkout is elsewhere.
+
+[Back to Contents](#contents)
+
+<a id="start-a1-and-a2"></a>
+## Start A1 and A2
+
+After building and sourcing the workspace, start Assignment 1 with the interactive launcher. Select `1` for the indoor mapping and planning mission or `2` for the outdoor GPS mission described in A1.3.
+
+```bash
+ros2 launch my_drone_control planner.launch.py
+```
+
+Start Assignment 2's localization stack separately. This starts the dedicated localization world, seeded sensors, EKF, plots, and the square plus figure-8 mission controlled by the EKF estimate:
+
+```bash
+ros2 launch my_drone_control localization_plots.launch.py \
+  repo_dir:="$HOME/LRS-URK" seed:=42 run_mission:=true
+```
+
+The A1 outdoor mission uses MAVROS GPS/local-position feedback; the A2 mission instead uses `/localization/ekf_pose` and is the outage-tolerant estimator flight. Do not start both flight missions against the same SITL instance. See [A2.1](#assignment-2-localization-plots) for the GPS keyboard toggle and sensor test services.
+
+[Back to Contents](#contents)
+
+<a id="how-to-run"></a>
+## How to Run
+
+The following legacy interactive launcher starts only A1. Use [Start A1 and A2](#start-a1-and-a2) for the separate A2 localization/EKF launch.
+
+```bash
 ros2 launch my_drone_control planner.launch.py
 ```
 
@@ -380,10 +401,12 @@ ros2 launch my_drone_control planner.launch.py
 1. **Find simulator checkouts.** The launch searches for the repositories and
   prints the paths it found. Override the defaults with `LRS_REPO_DIR` and
   `LRS_2_REPO_DIR`.
-2. **Choose an assignment.** Select `1` for indoor or `2` for outdoor. For
-  assignment `1`, answer whether to open RViz.
+2. **Choose the A1 mode.** Select `1` for the indoor A1.1/A1.2 mission or
+  `2` for the outdoor A1.3 GPS mission. This menu option `2` is not Assignment
+  2; start the EKF assignment with `localization_plots.launch.py` above. For
+  indoor mode, answer whether to open RViz.
 3. **Start the mission node.** Assignment `1` starts `map_planner_node` with
-  the bundled map and `missions/exam_example.csv`. Assignment `2` starts
+  the bundled map and `missions/exam_example.csv`. Outdoor mode starts
   `outdoor_mission`, which waits for GPS readiness before requesting flight
   mode or arming.
 4. **Start Gazebo.** Assignment `1` uses the hangar world; assignment `2` uses
@@ -391,8 +414,8 @@ ros2 launch my_drone_control planner.launch.py
 5. **Start ArduPilot SITL.** It starts 5 seconds after Gazebo.
 6. **Start MAVROS.** It starts 5 seconds after SITL.
 7. **Begin control.** For assignment `1`, `takeoff_drone` starts 10
-  seconds after MAVROS. Assignment `2` is already running and proceeds when
-  its GPS and MAVROS readiness checks pass.
+  seconds after MAVROS. The outdoor A1.3 mission is already running and
+  proceeds when its GPS and MAVROS readiness checks pass.
 
 All processes are managed by the launch. Press **Ctrl+C once in the launch
 terminal** to stop the stack. See [A1.3](#a1-3-outdoor-mission) for the outdoor
@@ -450,7 +473,7 @@ ros2 run my_drone_control map_planner_node --ros-args -p mission_path:=/path/to/
 
 The planner also accepts `map_path`, `voxel_size`, and `safety_radius` overrides.
 
-#### Assignment 2: outdoor mission
+#### A1.3 outdoor GPS mission (manual startup)
 
 Open four terminals. In each ROS terminal, source ROS and the workspace as
 shown above. Use the same LRS-URK checkout in the first three terminals.
@@ -496,7 +519,7 @@ running this mission, especially before any real-drone flight.
 <a id="ros-2-interface"></a>
 ## 4. ROS 2 Interface
 
-### Topics
+### A1 topics
 
 | Data | Topic | Type |
 | --- | --- | --- |
@@ -508,6 +531,19 @@ running this mission, especially before any real-drone flight.
 | Outdoor position/yaw target | `/mavros/setpoint_raw/local` | `mavros_msgs/msg/PositionTarget` |
 | MAVROS feedback | `/mavros/state`, `/mavros/local_position/pose`, `/mavros/global_position/*` | `mavros_msgs`, `geometry_msgs`, `sensor_msgs`, `std_msgs` |
 
+### A2 localization topics
+
+| Data | Topic | Type and use |
+| --- | --- | --- |
+| GPS position | `/localization/gps` | `geometry_msgs/msg/PoseWithCovarianceStamped`; EKF position correction, ENU `map` |
+| Visual odometry | `/localization/vo` | `nav_msgs/msg/Odometry`; EKF yaw and body-frame velocity corrections |
+| Gyro | `/localization/imu` | `sensor_msgs/msg/Imu`; EKF uses only `angular_velocity.z` for prediction |
+| EKF estimate | `/localization/ekf` | `nav_msgs/msg/Odometry`; estimate and covariance, `map` to `base_link` |
+| EKF controller pose | `/localization/ekf_pose` | `geometry_msgs/msg/PoseStamped`; feedback to `outdoor_mission` in A2 estimator mode |
+| Evaluation truth | `/evaluation/ground_truth` | `nav_msgs/msg/Odometry`; plotter only, never estimator/controller feedback |
+
+The A2 EKF subscribes only to GPS, VO, and IMU localization outputs. The plotter may additionally use evaluation truth for visualization and diagnostics. With `use_estimator:=true`, `outdoor_mission` uses `/localization/ekf_pose` as pose feedback and publishes velocity/yaw setpoints through `/mavros/setpoint_raw/local`.
+
 Planner outputs and `/planned_commands` use depth-1 transient-local QoS. MAVROS
 sensor inputs use `SensorDataQoS`; state uses depth 10. The planner and indoor
 controller use the `map` frame; the outdoor controller computes ENU targets and
@@ -517,6 +553,7 @@ MAVROS converts them for the FCU.
 
 - MAVROS clients: `/mavros/set_mode`, `/mavros/cmd/arming`, `/mavros/cmd/takeoff`.
 - Outdoor abort server: `/outdoor_mission/abort` (`std_srvs/srv/Trigger`); it requests LAND.
+- A2 sensor controls: `/localization/set_gps_enabled` and `/localization/set_vo_enabled` (`std_srvs/srv/SetBool`), and `/localization/inject_gps_outlier` (`std_srvs/srv/Trigger`).
 
 ```bash
 ros2 service call /outdoor_mission/abort std_srvs/srv/Trigger "{}"
@@ -571,16 +608,23 @@ flowchart LR
   Commands --> Indoor["takeoff_drone → /mavros/setpoint_position/local"]
 ```
 
-### ROS control
+### A1 and A2 control paths
 
 ```mermaid
 flowchart LR
   Planner["map_planner_node\nSingleThreadedExecutor"] -->|"/planned_commands\ntransient-local"| Indoor["takeoff_drone + FlightAssistant\nSingleThreadedExecutor"]
   Indoor -->|"PoseStamped setpoints"| Mavros["MAVROS"]
   Mavros -->|"state, pose, rel_alt"| Indoor
-  Outdoor["outdoor_mission\nSingleThreadedExecutor"] -->|"PositionTarget at 20 Hz"| Mavros
-  Mavros -->|"state, GPS, home, compass, pose, rel_alt"| Outdoor
-  Outdoor -.->|"abort Trigger → SetMode LAND"| Mavros
+  OutdoorA1["outdoor_mission\nA1 GPS mode"] -->|"PositionTarget at 20 Hz"| Mavros
+  Mavros -->|"state, GPS, home, compass, pose, rel_alt"| OutdoorA1
+  GPS["/localization/gps"] --> EKF["ekf_node\n8-state EKF"]
+  VO["/localization/vo"] --> EKF
+  IMU["/localization/imu gyro-Z"] --> EKF
+  EKF -->|"/localization/ekf_pose"| OutdoorA2["outdoor_mission\nA2 estimator mode"]
+  OutdoorA2 -->|"velocity + yaw setpoints"| Mavros
+  Truth["/evaluation/ground_truth"] -. "plotter only" .-> Plotter["localization_plotter"]
+  OutdoorA1 -.->|"abort Trigger → SetMode LAND"| Mavros
+  OutdoorA2 -.->|"abort Trigger → SetMode LAND"| Mavros
   Mavros <--> SITL["ArduPilot SITL"]
   SITL <--> Gazebo["Gazebo"]
 ```
